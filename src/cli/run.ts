@@ -1,0 +1,92 @@
+import type { ParseArgsConfig } from "node:util";
+import { parseArgs } from "node:util";
+import pkg from "../../package.json" with { type: "json" };
+import { defaultCommands } from "./commands.ts";
+
+export type RunInput = {
+  argv: string[];
+  cwd: string;
+  env: Record<string, string | undefined>;
+};
+export type RunResult = { exitCode: 0 | 1 | 2; stdout: string; stderr: string };
+export type CommandContext = {
+  values: Record<string, string | boolean | undefined>;
+  positionals: string[];
+  cwd: string;
+  env: RunInput["env"];
+  out(text: string): void;
+  err(text: string): void;
+};
+export type Command = {
+  name: string;
+  summary: string;
+  options?: ParseArgsConfig["options"];
+  positionals?: { name: string; required: boolean }[];
+  run(ctx: CommandContext): Promise<0 | 1>;
+};
+
+const usageError = (stderr: string): RunResult => ({ exitCode: 2, stdout: "", stderr });
+
+function helpText(commands: Command[]): string {
+  const lines = commands.map((c) => `  ${c.name}  ${c.summary}`);
+  return ["Usage: ltm <command> [options]", ...lines].join("\n") + "\n";
+}
+
+export async function run(
+  input: RunInput,
+  commands: Command[] = defaultCommands,
+): Promise<RunResult> {
+  const [head, ...rest] = input.argv;
+
+  if (head === "--version") return { exitCode: 0, stdout: `${pkg.version}\n`, stderr: "" };
+  if (head === undefined || head === "--help") {
+    return { exitCode: 0, stdout: helpText(commands), stderr: "" };
+  }
+
+  const cmd = commands.find((c) => c.name === head);
+  if (!cmd) {
+    return usageError(`ltm: unknown command '${head}'\nRun 'ltm --help' for usage.\n`);
+  }
+
+  // Exit 2 is decided here, before the command runs, so a command's own
+  // failure (1) can never be confused with a usage error.
+  let parsed: ReturnType<typeof parseArgs>;
+  try {
+    parsed = parseArgs({
+      args: rest,
+      options: cmd.options ?? {},
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return usageError(`ltm ${cmd.name}: ${reason}\n`);
+  }
+
+  const declared = cmd.positionals ?? [];
+  const required = declared.filter((p) => p.required).length;
+  const got = parsed.positionals.length;
+  if (got < required) {
+    const missing = declared.filter((p) => p.required).slice(got).map((p) => `<${p.name}>`);
+    return usageError(`ltm ${cmd.name}: missing argument ${missing.join(" ")}\n`);
+  }
+  if (got > declared.length) {
+    return usageError(`ltm ${cmd.name}: unexpected argument '${parsed.positionals[declared.length]}'\n`);
+  }
+
+  let stdout = "";
+  let stderr = "";
+  const exitCode = await cmd.run({
+    values: parsed.values as CommandContext["values"],
+    positionals: parsed.positionals,
+    cwd: input.cwd,
+    env: input.env,
+    out: (t) => {
+      stdout += t;
+    },
+    err: (t) => {
+      stderr += t;
+    },
+  });
+  return { exitCode, stdout, stderr };
+}
