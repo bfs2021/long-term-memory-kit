@@ -20,8 +20,7 @@ for tool in prettier oxfmt; do
   fi
 done
 
-# Each tool gets its own temp copy: oxfmt walks the whole working tree, untracked
-# files included, so formatting inside the repo would rewrite it.
+# Temp copy per tool: oxfmt walks the whole working tree, untracked files included, so formatting in the repo would rewrite it.
 tmps=()
 trap 'rm -rf "${tmps[@]}"' EXIT
 
@@ -34,16 +33,14 @@ status=0
 
 run_tool() {
   local tool="$1" tmp
-  # pwd -P: on macOS $TMPDIR sits behind a /var -> /private/var symlink, and the
-  # override globs fail to match when the tool sees the other spelling of the path.
+  # pwd -P: macOS $TMPDIR is behind a /var -> /private/var symlink, and override globs miss when the tool sees the other spelling.
   tmp="$(cd "$(mktemp -d)" && pwd -P)"
   tmps+=("$tmp")
   cp -R "$root/fixtures/formatter/repo/." "$tmp/"
   mkdir -p "$tmp/_memory/decisions"
   cp "$root"/fixtures/formatter/before/*.md "$tmp/_memory/decisions/"
 
-  # Pinned configs so a user's own config can't leak in. oxfmt has no --no-config,
-  # so the no-override run points it at an empty one.
+  # Pinned configs so a user's own config can't leak in; oxfmt has no --no-config, so it gets an empty one.
   local -a tool_args
   case "$tool" in
     prettier) tool_args=(--no-config --no-editorconfig) ;;
@@ -62,8 +59,8 @@ run_tool() {
 
   # Run with cwd at the temp root so the _memory/** globs resolve against it.
   case "$tool" in
-    prettier) (cd "$tmp" && "$root/node_modules/.bin/prettier" ${tool_args[@]+"${tool_args[@]}"} --write _memory notes.md >/dev/null) ;;
-    oxfmt) (cd "$tmp" && "$root/node_modules/.bin/oxfmt" ${tool_args[@]+"${tool_args[@]}"} _memory notes.md >/dev/null) ;;
+    prettier) (cd "$tmp" && "$root/node_modules/.bin/prettier" ${tool_args[@]+"${tool_args[@]}"} --write . >/dev/null) ;;
+    oxfmt) (cd "$tmp" && "$root/node_modules/.bin/oxfmt" ${tool_args[@]+"${tool_args[@]}"} . >/dev/null) ;;
   esac
   local rc=$?
   if [[ $rc -ne 0 ]]; then
@@ -80,8 +77,7 @@ run_tool() {
     fi
   done
 
-  # The override is scoped to _memory/**; notes.md must still be reformatted, or a
-  # tool that ignored everything would pass vacuously.
+  # Override is scoped to _memory/**; if notes.md isn't reformatted, a tool that ignored everything would pass vacuously.
   if (( overrides )) && cmp -s <(frontmatter "$root/fixtures/formatter/repo/notes.md") <(frontmatter "$tmp/notes.md"); then
     echo "$tool: notes.md: frontmatter unchanged, so the run proves nothing about the override"
     status=1
@@ -92,8 +88,7 @@ for tool in prettier oxfmt; do
   run_tool "$tool"
 done
 
-# The guide quotes the shipped templates verbatim; this fails when either side is
-# edited without the other.
+# The guide quotes the shipped templates verbatim; this fails when either side is edited without the other.
 guide=""
 [[ -f "$root/guide/formatters.md" ]] && guide="$(<"$root/guide/formatters.md")"
 for template in prettierrc.json oxfmtrc.json; do
