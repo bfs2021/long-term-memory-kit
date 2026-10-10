@@ -60,10 +60,12 @@ describe("run", () => {
     expect(r.stderr).toContain("no-such-command");
   });
 
-  test("unknown leading flag exits 2", async () => {
+  test("unknown leading flag exits 2 and is called an option", async () => {
     const r = await run({ ...base, argv: ["--nope"] });
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("unknown option");
+    expect(r.stderr).toContain("--nope");
   });
 
   test("a command's own failure returns 1, not 2", async () => {

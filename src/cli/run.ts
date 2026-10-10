@@ -45,7 +45,8 @@ export async function run(
 
   const cmd = commands.find((c) => c.name === head);
   if (!cmd) {
-    return usageError(`ltm: unknown command '${head}'\nRun 'ltm --help' for usage.\n`);
+    const kind = head.startsWith("-") ? "option" : "command";
+    return usageError(`ltm: unknown ${kind} '${head}'\nRun 'ltm --help' for usage.\n`);
   }
 
   // Exit 2 is decided here, before the command runs, so a command's own
@@ -64,10 +65,10 @@ export async function run(
   }
 
   const declared = cmd.positionals ?? [];
-  const required = declared.filter((p) => p.required).length;
+  const requiredArgs = declared.filter((p) => p.required);
   const got = parsed.positionals.length;
-  if (got < required) {
-    const missing = declared.filter((p) => p.required).slice(got).map((p) => `<${p.name}>`);
+  if (got < requiredArgs.length) {
+    const missing = requiredArgs.slice(got).map((p) => `<${p.name}>`);
     return usageError(`ltm ${cmd.name}: missing argument ${missing.join(" ")}\n`);
   }
   if (got > declared.length) {
