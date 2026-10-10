@@ -22,6 +22,7 @@ CASES = [
     ("deciders-nested.md", "deciders"),
     ("date-impossible.md", "date"),
     ("config-extra-key/memory-bank.yaml", "colour"),
+    ("consumers-key-newline/memory-bank.yaml", "consumers"),
 ]
 
 VALID_RECORD = """---

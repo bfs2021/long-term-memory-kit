@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kendrick/long-term-memory-kit/schema/memory-bank.schema.json",
+  "$comment": "Patterns end in (?!\\n)$ because Python re, which jsonschema uses, lets $ match before a final newline and ECMA-262 does not; the lookahead keeps both engines in agreement.",
   "title": "memory-bank.yaml",
   "description": "Configuration for one Bank, read from memory-bank.yaml at the Bank root.",
   "type": "object",
@@ -33,7 +34,7 @@
     "consumers": {
       "description": "Map a Consumer repo's git remote, as org/repo, to the Facets its agents read.",
       "type": "object",
-      "propertyNames": { "pattern": "^[^/\\s]+/[^/\\s]+$" },
+      "propertyNames": { "pattern": "^[^/\\s]+/[^/\\s]+(?!\\n)$" },
       "additionalProperties": {
         "type": "array",
         "items": { "$ref": "#/$defs/facet" }

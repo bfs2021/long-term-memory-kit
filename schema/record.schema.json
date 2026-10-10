@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kendrick/long-term-memory-kit/schema/record.schema.json",
+  "$comment": "Patterns end in (?!\\n)$ because Python re, which jsonschema uses, lets $ match before a final newline and ECMA-262 does not; the lookahead keeps both engines in agreement.",
   "title": "Record",
   "description": "Frontmatter of one Record in a Bank. Write every value as a scalar or a flat list of scalars.",
   "type": "object",
