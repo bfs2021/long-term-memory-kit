@@ -30,7 +30,7 @@ Loader.yaml_implicit_resolvers = {
 
 
 def validator(name):
-    with open(os.path.join(ROOT, "schema", name)) as f:
+    with open(os.path.join(ROOT, "schema", name), encoding="utf-8") as f:
         schema = json.load(f)
     return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
 
@@ -55,25 +55,34 @@ def frontmatter(text):
 def key_of(err):
     if err.absolute_path:
         return "/".join(str(p) for p in err.absolute_path)
+    # Read the key off the instance and schema, not jsonschema's English message,
+    # which isn't a stable interface.
     if err.validator == "required":
-        # jsonschema phrases it "'status' is a required property"
-        return err.message.split("'")[1]
+        absent = [n for n in err.validator_value if n not in err.instance]
+        if absent:
+            return absent[0]
     if err.validator == "additionalProperties":
-        return err.message.split("'")[1]
+        extra = [k for k in err.instance if k not in err.schema.get("properties", {})]
+        if extra:
+            return ",".join(str(k) for k in extra)
     return "(root)"
 
 
 def check(path, validators):
     """Return a list of '<key>: <message>' failures for one file."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         text = f.read()
-    if os.path.basename(path) == "memory-bank.yaml":
-        data, v = yaml.load(text, Loader), validators["config"]
-    else:
-        fm = frontmatter(text)
-        if fm is None:
-            return ["(frontmatter): missing"]
-        data, v = yaml.load(fm, Loader), validators["record"]
+    try:
+        if os.path.basename(path) == "memory-bank.yaml":
+            data, v = yaml.load(text, Loader), validators["config"]
+        else:
+            fm = frontmatter(text)
+            if fm is None:
+                return ["(frontmatter): missing"]
+            data, v = yaml.load(fm, Loader), validators["record"]
+    except yaml.YAMLError as e:
+        # One bad file mustn't abort the sweep; collapse the multi-line message.
+        return ["(yaml): " + " ".join(str(e).split())]
     if not isinstance(data, dict):
         return ["(root): not a mapping"]
     return [f"{key_of(e)}: {e.message}" for e in sorted(v.iter_errors(data), key=lambda e: list(map(str, e.absolute_path)))]
@@ -107,16 +116,21 @@ def main(argv):
             expect_pass(a)
         return 1 if bad else 0
 
+    # A missing or empty root would let CI go green while checking nothing.
     demo = os.path.join(FIXTURES, "demo-bank")
-    if os.path.isdir(demo):
-        for p in targets(os.path.join(demo, "_memory"), {"md"}) + targets(demo, {"yaml"}):
-            expect_pass(p)
+    demo_files = targets(os.path.join(demo, "_memory"), {"md"}) + targets(demo, {"yaml"})
     invalid = os.path.join(FIXTURES, "invalid")
-    if os.path.isdir(invalid):
-        for p in targets(invalid, {"md", "yaml"}):
-            if not check(p, validators):
-                print(f"{show(p)}: expected to fail but passed")
-                bad = True
+    invalid_files = targets(invalid, {"md", "yaml"})
+    for name, files in (("demo-bank", demo_files), ("invalid", invalid_files)):
+        if not files:
+            print(f"{name}: no files to check under {os.path.join(FIXTURES, name)}")
+            bad = True
+    for p in demo_files:
+        expect_pass(p)
+    for p in invalid_files:
+        if not check(p, validators):
+            print(f"{show(p)}: expected to fail but passed")
+            bad = True
     return 1 if bad else 0
 
 

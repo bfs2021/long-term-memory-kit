@@ -24,7 +24,7 @@
       "minLength": 1
     },
     "status": {
-      "description": "Set the lifecycle state. Treat a proposed Record as context, never as a constraint.",
+      "description": "Set the lifecycle state. A proposed Record is a Proposal: agents surface it but never treat it as a constraint.",
       "enum": ["proposed", "accepted", "superseded", "deprecated", "rejected"]
     },
     "date": {
@@ -52,11 +52,11 @@
       "type": "string"
     },
     "superseded_by": {
-      "description": "Name the one id of the Record that replaced this one. It holds a single id, while supersedes is a list.",
+      "description": "Name the one id of the Record that superseded this one. It holds a single id, while supersedes is a list.",
       "$ref": "#/$defs/id"
     },
     "supersedes": {
-      "description": "List the ids of the Records this one replaces. Fill superseded_by on each of them too.",
+      "description": "List the ids of the Records this one supersedes. Fill superseded_by on each of them too.",
       "type": "array",
       "items": { "$ref": "#/$defs/id" }
     },

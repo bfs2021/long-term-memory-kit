@@ -58,10 +58,6 @@ class CheckSchemaTest(unittest.TestCase):
             f.write(text)
         return dest
 
-    @unittest.skipUnless(
-        os.path.isdir(os.path.join(ROOT, "fixtures", "demo-bank")),
-        "fixtures/demo-bank not landed yet",
-    )
     def test_repo_as_committed_passes(self):
         r = run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -125,6 +121,54 @@ class CheckSchemaTest(unittest.TestCase):
         p = os.path.join(self.tmp, "dated.md")
         with open(p, "w") as f:
             f.write(VALID_RECORD.format(date="2026-03-31"))
+        r = run(p)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_empty_fixtures_dir_fails_instead_of_checking_nothing(self):
+        fixtures = os.path.join(self.tmp, "empty")
+        os.makedirs(fixtures)
+        r = run(env={"LTM_FIXTURES_DIR": fixtures})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("demo-bank", r.stdout + r.stderr)
+
+    def test_invalid_without_demo_bank_fails(self):
+        fixtures = os.path.join(self.tmp, "fixtures")
+        os.makedirs(os.path.join(fixtures, "invalid"))
+        with open(os.path.join(fixtures, "invalid", "bad.md"), "w") as f:
+            f.write("---\nschema: 1\n---\n")
+        r = run(env={"LTM_FIXTURES_DIR": fixtures})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("demo-bank", r.stdout + r.stderr)
+
+    def test_malformed_yaml_is_reported_without_a_traceback(self):
+        p = os.path.join(self.tmp, "broken.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("---\ntitle: [unclosed\nid: : :\n---\nBody.\n")
+        r = run(p)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("(yaml):", r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+
+    def test_two_extra_config_keys_are_both_reported(self):
+        p = self.copy_case(
+            "config-extra-key/memory-bank.yaml", lambda t: t + "shade: red\n"
+        )
+        r = run(p)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("colour,shade:", r.stdout)
+
+    def test_demo_bank_config_flips_on_extra_key(self):
+        src = os.path.join(ROOT, "fixtures", "demo-bank", "memory-bank.yaml")
+        with open(src, encoding="utf-8") as f:
+            original = f.read()
+        p = os.path.join(self.tmp, "memory-bank.yaml")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(original + "colour: blue\n")
+        r = run(p)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("colour:", r.stdout)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(original)
         r = run(p)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 

@@ -12,4 +12,4 @@ owners: [team:platform-engineering]
 related: [constrained_by::vD8mH3zQb5]
 ---
 
-Proposed only. Treat it as context until it is accepted.
+Proposed only. Agents surface it but never treat it as a constraint until it is accepted.

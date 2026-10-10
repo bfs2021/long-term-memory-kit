@@ -5,7 +5,7 @@ memory_type: PolicyRule
 title: Shared SFTP for partner files
 status: deprecated
 date: 2023-06-01
-summary: Partner file exchange in Acme goes through the shared SFTP host, which the object-storage gateway replaced.
+summary: Partner file exchange in Acme goes through the shared SFTP host, which the object-storage gateway superseded.
 applies_to: [domain:commerce, system:data-platform]
 owners: [team:commerce-architecture]
 ---

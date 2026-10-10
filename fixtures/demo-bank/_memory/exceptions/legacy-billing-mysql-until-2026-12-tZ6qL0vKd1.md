@@ -10,7 +10,7 @@ effective_to: 2026-12-31
 review_by: 2026-11-15
 applies_to: [service:billing-service]
 owners: [team:commerce-architecture]
-related: [constrained_by::kQ7vN2xLp4]
+related: [constrained_by::nR5hB2yTq8]
 ---
 
-Billing-service migrates in Q4. Until then it keeps its MySQL instance and may not add new tables.
+Billing-service migrates in Q4, so it departs from the PostgreSQL PolicyRule until then. It keeps its MySQL instance and may not add new tables.
