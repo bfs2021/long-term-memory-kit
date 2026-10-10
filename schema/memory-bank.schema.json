@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kendrick/long-term-memory-kit/schema/memory-bank.schema.json",
+  "title": "memory-bank.yaml",
+  "description": "Configuration for one Bank, read from memory-bank.yaml at the Bank root.",
+  "type": "object",
+  "required": ["schema", "name", "facet_prefixes"],
+  "properties": {
+    "schema": {
+      "description": "Set to 1, the config schema version.",
+      "const": 1
+    },
+    "name": {
+      "description": "Name the Bank. It labels this Bank's Records in multi-Bank results.",
+      "type": "string"
+    },
+    "facet_prefixes": {
+      "description": "List every Facet prefix this Bank allows, such as service or domain. Records may use only these.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]*$"
+      }
+    },
+    "folders": {
+      "description": "Map a memory type to its folder, relative to the Bank root. Defaults: Decision _memory/decisions, PolicyRule _memory/policy-rules, Exception _memory/exceptions, Context _memory/context.",
+      "type": "object",
+      "propertyNames": { "enum": ["Decision", "PolicyRule", "Exception", "Context"] },
+      "additionalProperties": { "type": "string" }
+    },
+    "consumers": {
+      "description": "Map a Consumer repo's git remote, as org/repo, to the Facets its agents read.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[^/\\s]+/[^/\\s]+$" },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/facet" }
+      }
+    },
+    "heading_aliases": {
+      "description": "Map a canonical body heading (Context, Decision, Consequences, Status) to the other headings that count as it.",
+      "type": "object",
+      "propertyNames": { "enum": ["Context", "Decision", "Consequences", "Status"] },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "doctor": {
+      "description": "Override the thresholds ltm doctor reports against. Omit a key to keep its default.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stale_confirmed_days": {
+          "description": "Report a Record whose last_confirmed is older than this many days.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 90
+        },
+        "proposal_age_days": {
+          "description": "Report a Proposal older than this many days.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        },
+        "max_chain_length": {
+          "description": "Report a Supersession chain longer than this many Records.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 3
+        },
+        "orphan_days": {
+          "description": "Report a Record with no relationships once it is older than this many days.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 30
+        }
+      }
+    },
+    "recall": {
+      "description": "Reserved. Accepted with any value, and v1 ignores it."
+    },
+    "subject": {
+      "description": "Reserved. Accepted with any value, and v1 ignores it."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "facet": {
+      "description": "A Facet written as <prefix>:<value>, with a lowercase prefix.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*:.+$"
+    }
+  }
+}

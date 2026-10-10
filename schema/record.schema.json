@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kendrick/long-term-memory-kit/schema/record.schema.json",
+  "title": "Record",
+  "description": "Frontmatter of one Record in a Bank. Write every value as a scalar or a flat list of scalars.",
+  "type": "object",
+  "required": ["schema", "id", "memory_type", "title", "status", "date"],
+  "properties": {
+    "schema": {
+      "description": "Set to 1, the Record schema version.",
+      "const": 1
+    },
+    "id": {
+      "description": "Give the Record a unique 10-character nanoid from [A-Za-z0-9_-] and never change it.",
+      "$ref": "#/$defs/id"
+    },
+    "memory_type": {
+      "description": "Pick exactly one memory type: Decision, PolicyRule, Exception, or Context.",
+      "enum": ["Decision", "PolicyRule", "Exception", "Context"]
+    },
+    "title": {
+      "description": "Name the Record in a short, non-empty line.",
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "description": "Set the lifecycle state. Treat a proposed Record as context, never as a constraint.",
+      "enum": ["proposed", "accepted", "superseded", "deprecated", "rejected"]
+    },
+    "date": {
+      "description": "Record the date the Record was written or last accepted, as YYYY-MM-DD.",
+      "$ref": "#/$defs/date"
+    },
+    "effective_from": {
+      "description": "Set the YYYY-MM-DD date the Record starts to apply, if it applies later than its date.",
+      "$ref": "#/$defs/date"
+    },
+    "effective_to": {
+      "description": "Set the YYYY-MM-DD date the Record stops applying, such as the end of an Exception.",
+      "$ref": "#/$defs/date"
+    },
+    "last_confirmed": {
+      "description": "Set the YYYY-MM-DD date someone last confirmed the Record still holds. Only move it forward.",
+      "$ref": "#/$defs/date"
+    },
+    "review_by": {
+      "description": "Set the YYYY-MM-DD date by which someone must review the Record again.",
+      "$ref": "#/$defs/date"
+    },
+    "summary": {
+      "description": "State the claim and its scope in one sentence.",
+      "type": "string"
+    },
+    "superseded_by": {
+      "description": "Name the one id of the Record that replaced this one. It holds a single id, while supersedes is a list.",
+      "$ref": "#/$defs/id"
+    },
+    "supersedes": {
+      "description": "List the ids of the Records this one replaces. Fill superseded_by on each of them too.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/id" }
+    },
+    "promoted_from": {
+      "description": "Name where this Record came from when promoted out of a repo's working memory.",
+      "type": "string"
+    },
+    "promoted_to": {
+      "description": "Name the Bank Record this item was promoted to, as <bank>:<id>.",
+      "type": "string"
+    },
+    "subject": {
+      "description": "Reserved. Accepted here, and v1 ignores it.",
+      "type": "string"
+    },
+    "applies_to": {
+      "description": "List the Facets where the Record applies, each as <prefix>:<value> using a prefix the Bank declares.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/facet" }
+    },
+    "owners": {
+      "description": "List the Facets that own the Record, each as <prefix>:<value>, such as team:commerce-architecture.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/facet" }
+    },
+    "tags": {
+      "description": "List free-form keywords for search. Use applies_to, not tags, to say where the Record applies.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "source_refs": {
+      "description": "List the sources the Record was drawn from, such as URLs, file paths, or PR references.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "related": {
+      "description": "List links to other Records, each as <relation>::<id>, such as constrained_by::<PolicyRule id> on an Exception.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z_]+::[A-Za-z0-9_-]{10}$"
+      }
+    }
+  },
+  "additionalProperties": {
+    "description": "Keep a key the schema doesn't define to a scalar or a flat list of scalars, never an object or a list holding one.",
+    "anyOf": [
+      { "$ref": "#/$defs/scalar" },
+      { "type": "array", "items": { "$ref": "#/$defs/scalar" } }
+    ]
+  },
+  "$defs": {
+    "id": {
+      "description": "A 10-character nanoid from [A-Za-z0-9_-].",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{10}$"
+    },
+    "date": {
+      "description": "A calendar date written as YYYY-MM-DD.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "format": "date"
+    },
+    "facet": {
+      "description": "A Facet written as <prefix>:<value>, with a lowercase prefix.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*:.+$"
+    },
+    "scalar": {
+      "description": "A string, number, boolean, or null.",
+      "type": ["string", "number", "integer", "boolean", "null"]
+    }
+  }
+}
