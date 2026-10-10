@@ -1,0 +1,4 @@
+schema: 1
+name: acme
+facet_prefixes: [service, domain]
+colour: blue
