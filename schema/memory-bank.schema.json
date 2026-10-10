@@ -21,7 +21,7 @@
       "uniqueItems": true,
       "items": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*$"
+        "pattern": "^[a-z][a-z0-9-]*(?!\\n)$"
       }
     },
     "folders": {
@@ -91,7 +91,7 @@
     "facet": {
       "description": "A Facet written as <prefix>:<value>, with a lowercase prefix.",
       "type": "string",
-      "pattern": "^[a-z][a-z0-9-]*:.+$"
+      "pattern": "^[a-z][a-z0-9-]*:.+(?!\\n)$"
     }
   }
 }

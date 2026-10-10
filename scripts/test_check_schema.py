@@ -15,6 +15,7 @@ CASES = [
     ("missing-status.md", "status"),
     ("status-approved.md", "status"),
     ("id-nine-chars.md", "id"),
+    ("id-trailing-newline.md", "id"),
     ("memory-type-policy.md", "memory_type"),
     ("applies-to-no-prefix.md", "applies_to/0"),
     ("related-no-separator.md", "related/0"),
@@ -68,7 +69,10 @@ class CheckSchemaTest(unittest.TestCase):
                 rel = os.path.join("fixtures", "invalid", name)
                 r = run(os.path.join(ROOT, rel))
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn(f"{rel}: {key}:", r.stdout)
+                # One defect per fixture: a second diagnostic would mask a regression.
+                lines = [line for line in r.stdout.splitlines() if line.startswith(f"{rel}:")]
+                self.assertEqual(len(lines), 1, r.stdout)
+                self.assertTrue(lines[0].startswith(f"{rel}: {key}:"), lines[0])
 
     def test_missing_status_flips_when_status_added(self):
         p = self.copy_case(
