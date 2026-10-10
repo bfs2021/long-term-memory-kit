@@ -26,4 +26,21 @@ jobs:
           python-version: '3.12'
       - run: pip install -r scripts/requirements.txt
       - run: python3 scripts/check-schema.py
+      - run: python3 scripts/check-schema.py fixtures/formatter/before/*.md
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
+  formatters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+      - run: bash scripts/check-formatters.sh
+      # Exit 1 means the formatters rewrote frontmatter, as they must without the overrides. Exit 2 is a broken setup, so it has to fail the step too.
+      - name: check-formatters.sh --no-overrides fails as expected
+        run: |
+          set +e
+          bash scripts/check-formatters.sh --no-overrides
+          test $? -eq 1
