@@ -16,9 +16,17 @@ export type Rule =
   | "facet-prefix"
   | "unique-id"
   | "frontmatter"
-  | "walk";
+  | "walk"
+  | "supersession-missing-target"
+  | "supersession-incomplete"
+  | "supersession-status"
+  | "supersession-facets"
+  | "body-sections"
+  | "bright-line";
 
-export type Finding = { file: string; line: number; rule: Rule; severity: "error"; key: string | null; message: string };
+export type Severity = "error" | "warning";
+
+export type Finding = { file: string; line: number; rule: Rule; severity: Severity; key: string | null; message: string };
 
 const CONFIG_FILE = "memory-bank.yaml";
 const LINE_BUDGET = 20;
@@ -46,11 +54,18 @@ function compileSchema(file: string): ValidateFunction {
 const recordSchema = (): ValidateFunction => compileSchema("record.schema.json");
 const configSchema = (): ValidateFunction => compileSchema("memory-bank.schema.json");
 
-const finding = (file: string, line: number, rule: Rule, key: string | null, message: string): Finding => ({
+const finding = (
+  file: string,
+  line: number,
+  rule: Rule,
+  key: string | null,
+  message: string,
+  severity: Severity = "error",
+): Finding => ({
   file,
   line,
   rule,
-  severity: "error",
+  severity,
   key,
   message,
 });
@@ -85,6 +100,7 @@ type Frontmatter = {
   rel: string;
   src: string;
   closingLine: number;
+  body: string;
   keys: KeyLines;
   data: Record<string, unknown>;
   lineOf: (key: string | null) => number;
@@ -110,15 +126,20 @@ function checkFrontmatter(rel: string, text: string): { findings: Finding[]; fm:
   } catch (e) {
     return fail(1, firstLine((e as Error).message));
   }
-  return { findings: [], fm: { rel, src, closingLine: split.closingLine, keys, data, lineOf } };
+  return { findings: [], fm: { rel, src, closingLine: split.closingLine, body: split.body, keys, data, lineOf } };
 }
 
 function checkSchema({ rel, data, lineOf }: Frontmatter): Finding[] {
   const validate = recordSchema();
   if (validate(data)) return [];
-  return (validate.errors ?? []).map((e) => {
+  const errors = validate.errors ?? [];
+  // An undeclared key's `anyOf` reports each branch's errors (at /key or /key/0, so not always one
+  // instancePath) plus a closing anyOf error. The closing one alone says what's wrong.
+  const collapsed = new Set(errors.filter((e) => e.keyword === "anyOf").map(errorKey));
+  const kept = errors.filter((e) => e.keyword === "anyOf" || !collapsed.has(errorKey(e)));
+  return kept.map((e) => {
     const key = errorKey(e);
-    let message = e.message ?? e.keyword;
+    let message = e.keyword === "anyOf" ? "must be a scalar or a flat list of scalars" : (e.message ?? e.keyword);
     if (e.keyword === "required" && key !== null && KEYS_LTM_FMT_FILLS.has(key)) message += "; `ltm fmt` will add it";
     return finding(rel, lineOf(key), "schema", key, message);
   });
@@ -143,7 +164,7 @@ function checkLineBudget({ rel, closingLine }: Frontmatter): Finding[] {
   return [finding(rel, closing, "line-budget", null, `frontmatter closes on line ${closing}; the budget is ${LINE_BUDGET}`)];
 }
 
-function checkFolderType({ rel, data, lineOf }: Frontmatter, folderType: MemoryType): Finding[] {
+function checkFolderType({ rel, data, lineOf }: Frontmatter, folderType: MemoryType, folderPath?: string): Finding[] {
   const written = data.memory_type;
   if (typeof written !== "string" || written === folderType) return [];
   return [
@@ -152,7 +173,7 @@ function checkFolderType({ rel, data, lineOf }: Frontmatter, folderType: MemoryT
       lineOf("memory_type"),
       "folder-type",
       "memory_type",
-      `memory_type is '${written}' but the file is in the ${folderType} folder (${posix.dirname(rel)})`,
+      `memory_type is '${written}' but the file is in the ${folderType} folder (${folderPath ?? posix.dirname(rel)})`,
     ),
   ];
 }
@@ -175,25 +196,80 @@ function checkFacetPrefixes({ rel, data, lineOf }: Frontmatter, known: ReadonlyS
   return out;
 }
 
-type RecordResult = { findings: Finding[]; id: string | null; idLine: number };
+const SECTIONS = {
+  Context: ["context", "context and problem statement"],
+  Decision: ["decision", "decision outcome"],
+  Consequences: ["consequences"],
+} as const;
+type Section = keyof typeof SECTIONS;
+export type HeadingAliases = Partial<Record<Section, string[]>>;
+
+// Config schema errors are reported on their own; a malformed map here must not also crash the run.
+function headingAliases(raw: unknown): HeadingAliases {
+  const out: HeadingAliases = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  for (const name of Object.keys(SECTIONS) as Section[]) {
+    const v = (raw as Record<string, unknown>)[name];
+    // A mixed list is a config typo; honoring half of it would classify on a guess.
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) out[name] = v as string[];
+  }
+  return out;
+}
+
+// Headings inside a fenced code block are sample text, not structure.
+function headingTexts(body: string): Set<string> {
+  const out = new Set<string>();
+  // CommonMark: a closer repeats the opener's character at least as many times; an unclosed fence runs to EOF.
+  let fence: { char: string; len: number } | null = null;
+  for (const raw of body.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (fence) {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+      if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (open && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
+      fence = { char: open[1]![0]!, len: open[1]!.length };
+      continue;
+    }
+    const h = /^ {0,3}#{1,6}(?:[ \t]+(.*))?$/.exec(line);
+    // An ATX closing sequence is a run of # after a space or tab at the end of the line.
+    if (h) out.add((h[1] ?? "").replace(/(^|[ \t]+)#+[ \t]*$/, "").trim().toLowerCase());
+  }
+  return out;
+}
+
+function checkBodySections({ rel, body }: Frontmatter, aliases: HeadingAliases): Finding[] {
+  const have = headingTexts(body);
+  const missing = (Object.keys(SECTIONS) as Section[]).filter(
+    (name) => ![...SECTIONS[name], ...(aliases[name] ?? []).map((a) => a.trim().toLowerCase())].some((h) => have.has(h)),
+  );
+  if (missing.length === 0) return [];
+  return [finding(rel, 1, "body-sections", null, `Decision body has no ${missing.join(", ")} heading`, "warning")];
+}
+
+type RecordResult = { findings: Finding[]; id: string | null; idLine: number; fm: Frontmatter | null };
 
 function analyzeRecord(
   rel: string,
   folderType: MemoryType,
   text: string,
   facetPrefixes: ReadonlySet<string> | null,
+  opts: { folderPath?: string; aliases?: HeadingAliases } = {},
 ): RecordResult {
   const { findings, fm } = checkFrontmatter(rel, text);
-  if (!fm) return { findings, id: null, idLine: 1 };
+  if (!fm) return { findings, id: null, idLine: 1, fm: null };
   findings.push(
     ...checkSchema(fm),
     ...checkCanonicalLists(fm),
     ...checkLineBudget(fm),
-    ...checkFolderType(fm, folderType),
+    ...checkFolderType(fm, folderType, opts.folderPath),
     ...checkFacetPrefixes(fm, facetPrefixes),
   );
+  if (folderType === "Decision") findings.push(...checkBodySections(fm, opts.aliases ?? {}));
   const id = typeof fm.data.id === "string" ? fm.data.id : null;
-  return { findings, id, idLine: fm.lineOf("id") };
+  return { findings, id, idLine: fm.lineOf("id"), fm };
 }
 
 export function checkRecordText(
@@ -201,9 +277,152 @@ export function checkRecordText(
   folderType: MemoryType,
   text: string,
   facetPrefixes: string[] | null,
+  folderPath?: string,
 ): { findings: Finding[]; id: string | null } {
-  const { findings, id } = analyzeRecord(rel, folderType, text, facetPrefixes && new Set(facetPrefixes));
+  const { findings, id } = analyzeRecord(rel, folderType, text, facetPrefixes && new Set(facetPrefixes), { folderPath });
   return { findings, id };
+}
+
+type Node = { file: string; type: MemoryType; fm: Frontmatter };
+
+// A finding plus the other file its message names, so a paths filter can keep it when either end was named.
+type Pending = { finding: Finding; also: string };
+
+const stringList = (v: unknown): string[] =>
+  typeof v === "string" ? [v] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+
+// Missing, null, or empty means "applies everywhere", so it overlaps with anything.
+function sharesScope(a: unknown, b: unknown): boolean {
+  const as = stringList(a);
+  const bs = stringList(b);
+  if (as.length === 0 || bs.length === 0) return true;
+  return as.some((x) => bs.includes(x));
+}
+
+// Reads every Record, named or not: the other end of an edge may live in a file nobody named.
+function checkSupersession(nodes: Node[]): Pending[] {
+  const sorted = [...nodes].sort((a, b) => cmp(a.file, b.file));
+  // An id held by several Records is `unique-id`'s to report, and an edge can't pick between holders. So an
+  // edge is recorded only when its target resolves to one Record, and `incomplete` is skipped when either
+  // end's own id is shared, since the reciprocal side can't be resolved. Scope needs no reciprocal, so
+  // `facets` still runs on every recorded edge.
+  const byId = new Map<string, Node[]>();
+  for (const n of sorted) {
+    const id = n.fm.data.id;
+    if (typeof id !== "string") continue;
+    const held = byId.get(id);
+    if (held) held.push(n);
+    else byId.set(id, [n]);
+  }
+
+  const unique = (id: unknown) => typeof id === "string" && byId.get(id)?.length === 1;
+
+  const out: Pending[] = [];
+  // Edge (old, new) -> which side wrote it down.
+  const edges = new Map<string, { old: Node; new: Node; byOld: boolean; byNew: boolean }>();
+  const edge = (o: Node, n: Node) => {
+    const k = `${o.file}\0${n.file}`;
+    let e = edges.get(k);
+    if (!e) edges.set(k, (e = { old: o, new: n, byOld: false, byNew: false }));
+    return e;
+  };
+  const missing = (n: Node, key: string, id: string) =>
+    out.push({
+      finding: finding(n.file, n.fm.lineOf(key), "supersession-missing-target", key, `${key} names '${id}', which no Record has`),
+      also: n.file,
+    });
+
+  for (const n of sorted) {
+    const { data } = n.fm;
+    const by = data.superseded_by;
+    if (typeof by === "string" && by !== "") {
+      const targets = byId.get(by);
+      if (!targets) missing(n, "superseded_by", by);
+      else if (unique(by)) edge(n, targets[0]!).byOld = true;
+      if (data.status !== "superseded") {
+        const key = n.fm.keys.has("status") ? "status" : "superseded_by";
+        out.push({
+          finding: finding(
+            n.file,
+            n.fm.lineOf(key),
+            "supersession-status",
+            "status",
+            `status is '${String(data.status ?? "")}' but superseded_by is set; a superseded Record needs status 'superseded'`,
+          ),
+          also: n.file,
+        });
+      }
+    }
+    for (const id of new Set(stringList(data.supersedes))) {
+      const targets = byId.get(id);
+      if (!targets) missing(n, "supersedes", id);
+      else if (unique(id)) edge(targets[0]!, n).byNew = true;
+    }
+  }
+
+  for (const e of edges.values()) {
+    const resolvable = unique(e.old.fm.data.id) && unique(e.new.fm.data.id);
+    if (resolvable && e.byOld && !e.byNew) {
+      out.push({
+        finding: finding(
+          e.old.file,
+          e.old.fm.lineOf("superseded_by"),
+          "supersession-incomplete",
+          "superseded_by",
+          `superseded_by names ${e.new.file}, which doesn't list it back in supersedes`,
+        ),
+        also: e.new.file,
+      });
+    } else if (resolvable && e.byNew && !e.byOld) {
+      out.push({
+        finding: finding(
+          e.new.file,
+          e.new.fm.lineOf("supersedes"),
+          "supersession-incomplete",
+          "supersedes",
+          `supersedes names ${e.old.file}, which doesn't list it back in superseded_by`,
+        ),
+        also: e.old.file,
+      });
+    }
+    if (!sharesScope(e.old.fm.data.applies_to, e.new.fm.data.applies_to)) {
+      out.push({
+        finding: finding(
+          e.old.file,
+          e.old.fm.lineOf("applies_to"),
+          "supersession-facets",
+          "applies_to",
+          `${e.old.file} and ${e.new.file} are linked by supersession but share no applies_to entry`,
+        ),
+        also: e.new.file,
+      });
+    }
+  }
+  return out;
+}
+
+// A Record scoped to one service and tied to no PolicyRule is probably one repo's working memory.
+function checkBrightLine(nodes: Node[]): Finding[] {
+  const policyIds = new Set<string>();
+  for (const n of nodes) if (n.type === "PolicyRule" && typeof n.fm.data.id === "string") policyIds.add(n.fm.data.id);
+  const out: Finding[] = [];
+  for (const n of nodes) {
+    const scope = n.fm.data.applies_to;
+    const only = Array.isArray(scope) && scope.length === 1 ? scope[0] : undefined;
+    if (typeof only !== "string" || !only.startsWith("service:")) continue;
+    if (stringList(n.fm.data.related).some((r) => policyIds.has(r.includes("::") ? r.slice(r.lastIndexOf("::") + 2) : r))) continue;
+    out.push(
+      finding(
+        n.file,
+        n.fm.lineOf("applies_to"),
+        "bright-line",
+        "applies_to",
+        `scoped to only ${only} and tied to no PolicyRule; it may be working memory for that service's repo rather than Bank memory`,
+        "warning",
+      ),
+    );
+  }
+  return out;
 }
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -233,7 +452,7 @@ export function checkConfig(root: string): { findings: Finding[]; config: BankCo
   try {
     config = loadConfig(root);
   } catch (e) {
-    // loadConfig lets yaml's alias-limit ReferenceError through unwrapped; anything else is a bug, not a bad config.
+    // The ReferenceError branch covers loadConfig builds that don't yet wrap yaml's alias-limit error; anything else is a bug, not a bad config.
     if (!(e instanceof ConfigError) && !(e instanceof ReferenceError)) throw e;
     // Without a config, every Record's type folder is unknown.
     const line = e instanceof ConfigError ? (e.line ?? 1) : 1;
@@ -262,10 +481,24 @@ function sortFindings(fs: Finding[]): Finding[] {
 
 const toPosix = (p: string): string => p.split(sep).join("/");
 
+export type BankReport = { findings: Finding[]; files: string[] };
+
+// JUnit needs a testcase per file judged, including the clean ones, which findings alone can't supply.
+function report(findings: Finding[], judged: Iterable<string>): BankReport {
+  const files = new Set(judged);
+  for (const f of findings) files.add(f.file);
+  return { findings: sortFindings(findings), files: [...files].sort(cmp) };
+}
+
 export function validateBank(root: string, paths: string[] | null, cwd: string): Finding[] {
+  return validateBankReport(root, paths, cwd).findings;
+}
+
+export function validateBankReport(root: string, paths: string[] | null, cwd: string): BankReport {
   const bankRoot = resolve(root);
   const { findings, config } = checkConfig(bankRoot);
-  if (!config) return sortFindings(findings);
+  const judged: string[] = [CONFIG_FILE];
+  if (!config) return report(findings, judged);
 
   const named = paths
     ? paths.map((p) => {
@@ -295,10 +528,14 @@ export function validateBank(root: string, paths: string[] | null, cwd: string):
   const raw = config.raw.facet_prefixes;
   const prefixes = Array.isArray(raw) && raw.every((x) => typeof x === "string") ? new Set(raw as string[]) : null;
 
+  const aliases = headingAliases(config.raw.heading_aliases);
+
   const ids: { file: string; line: number; id: string }[] = [];
+  const nodes: Node[] = [];
   // Every Record is read even when paths are named: a duplicate id may live in a file nobody named.
   for (const f of files) {
     const isNamed = !namedRels || namedRels.has(f.rel);
+    if (isNamed) judged.push(f.rel);
     let text: string;
     try {
       text = readFileSync(f.abs, "utf8");
@@ -306,10 +543,17 @@ export function validateBank(root: string, paths: string[] | null, cwd: string):
       if (isNamed) findings.push(finding(f.rel, 1, "walk", null, firstLine((e as Error).message)));
       continue;
     }
-    const r = analyzeRecord(f.rel, f.type, text, prefixes);
+    const r = analyzeRecord(f.rel, f.type, text, prefixes, { folderPath: config.folders[f.type], aliases });
     if (isNamed) findings.push(...r.findings);
     if (r.id !== null) ids.push({ file: f.rel, line: r.idLine, id: r.id });
+    if (r.fm) nodes.push({ file: f.rel, type: f.type, fm: r.fm });
   }
   findings.push(...checkUniqueIds(ids, namedRels));
-  return sortFindings(findings);
+  for (const p of checkSupersession(nodes)) {
+    if (!namedRels || namedRels.has(p.finding.file) || namedRels.has(p.also)) findings.push(p.finding);
+  }
+  for (const f of checkBrightLine(nodes)) {
+    if (!namedRels || namedRels.has(f.file)) findings.push(f);
+  }
+  return report(findings, judged);
 }

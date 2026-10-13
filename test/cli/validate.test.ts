@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -54,10 +55,11 @@ const blockTags = (text: string) => {
 };
 
 const threeDefects = (text: string) =>
-  replaceLine(blockTags(replaceLine(text, "status:", null)), "applies_to:", "applies_to: [serivce:x]");
+  replaceLine(blockTags(replaceLine(text, "status:", null)), "applies_to:", "applies_to: [domain:commerce, serivce:x]");
 
 // A second Record built from the demo one, so it stays schema-valid as the fixture evolves.
-const freshRecord = (pg: string, id: string) => replaceLine(pg, "id:", `id: ${id}`);
+// It drops `supersedes`: the older Record points at the original, so a copy keeping it is a half-declared Supersession.
+const freshRecord = (pg: string, id: string) => replaceLine(replaceLine(pg, "id:", `id: ${id}`), "supersedes:", null);
 
 describe("ltm validate", () => {
   test("1: an unmodified demo Bank exits 0 with empty stdout", async () => {
@@ -107,7 +109,8 @@ describe("ltm validate", () => {
       await withScratch(demo, async (dir) => {
         const pg = readFileSync(join(dir, PG), "utf8");
         const file = "_memory/decisions/padded-pP0aD0dE01.md";
-        const atTwenty = pad(freshRecord(pg, "pP0aD0dE01"), 20 - closingLine(pg));
+        const fresh = freshRecord(pg, "pP0aD0dE01");
+        const atTwenty = pad(fresh, 20 - closingLine(fresh));
         expect(closingLine(atTwenty)).toBe(20);
 
         writeFileSync(join(dir, file), atTwenty + "\nbody\n".repeat(30));
@@ -162,17 +165,17 @@ describe("ltm validate", () => {
 
   test("5: facet-prefix reads facet_prefixes from the scratch config", async () => {
     await withScratch(demo, async (dir) => {
-      const misspelled = edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [serivce:order-service]"));
+      const misspelled = edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [domain:commerce, serivce:order-service]"));
       const r = await ltm(dir, "validate");
       expect(r.exitCode).toBe(1);
       expect(lines(r.stdout)).toEqual([
         `${PG}:${lineOf(misspelled, "applies_to:")}: error facet-prefix: applies_to: 'serivce:order-service' uses prefix 'serivce', which facet_prefixes doesn't list`,
       ]);
 
-      edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [service:order-service]"));
+      edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [domain:commerce, service:order-service]"));
       expect(await ltm(dir, "validate")).toMatchObject({ exitCode: 0, stdout: "" });
 
-      edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [serivce:order-service]"));
+      edit(join(dir, PG), (t) => replaceLine(t, "applies_to:", "applies_to: [domain:commerce, serivce:order-service]"));
       const cfg = edit(join(dir, "memory-bank.yaml"), (t) => t.replace(/^facet_prefixes: \[/m, "facet_prefixes: [serivce, "));
       expect(cfg).toMatch(/^facet_prefixes: \[serivce, /m);
       expect(await ltm(dir, "validate")).toMatchObject({ exitCode: 0, stdout: "" });
@@ -368,6 +371,115 @@ describe("ltm validate", () => {
       expect(lines(r.stdout)[0]).toStartWith(`${copy}:`);
       expect(lines(r.stdout)[0]).toContain(" error unique-id: ");
       expect(lines(r.stdout)[0]).toContain(PG);
+    });
+  });
+  describe("17: --format picks a CI report", () => {
+    const REDIS = "_memory/exceptions/order-service-redis-until-2027-03-wJ3nC7hTy4.md";
+    const MYSQL = "_memory/decisions/mysql-for-new-services-mB3tR9wZe1.md";
+
+    // One schema error on PG, and one bright-line warning from cutting the Exception loose from its PolicyRule.
+    const oneOfEach = async (dir: string) => {
+      edit(join(dir, PG), (t) => replaceLine(t, "status:", null));
+      edit(join(dir, REDIS), (t) => replaceLine(t, "related:", null));
+      const human = lines((await ltm(dir, "validate")).stdout);
+      expect(human).toHaveLength(2);
+      expect(human.some((l) => l.startsWith(`${PG}:`) && l.includes(" error schema: "))).toBe(true);
+      expect(human.some((l) => l.startsWith(`${REDIS}:`) && l.includes(" warning bright-line: "))).toBe(true);
+    };
+
+    test("github prints one annotation per finding and exits 1", async () => {
+      await withScratch(demo, async (dir) => {
+        await oneOfEach(dir);
+        const r = await ltm(dir, "validate", "--format", "github");
+        expect(r.exitCode).toBe(1);
+        expect(r.stderr).toBe("");
+        expect(r.stdout.endsWith("\n")).toBe(true);
+        const ls = r.stdout.slice(0, -1).split("\n");
+        expect(ls).toHaveLength(2);
+        expect(ls.filter((l) => l.startsWith("::error "))).toEqual([expect.stringContaining("title=schema::")]);
+        expect(ls.filter((l) => l.startsWith("::warning "))).toEqual([expect.stringContaining("title=bright-line::")]);
+      });
+    });
+
+    test("gitlab parses as JSON with two Code Quality elements and stable fingerprints", async () => {
+      await withScratch(demo, async (dir) => {
+        await oneOfEach(dir);
+        const r = await ltm(dir, "validate", "--format", "gitlab");
+        expect(r.exitCode).toBe(1);
+        const rows = JSON.parse(r.stdout) as Record<string, unknown>[];
+        expect(rows).toHaveLength(2);
+        for (const row of rows) {
+          expect(Object.keys(row).sort()).toEqual(["check_name", "description", "fingerprint", "location", "severity"]);
+          expect(row.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+          expect(row.location).toMatchObject({ path: expect.any(String), lines: { begin: expect.any(Number) } });
+        }
+        expect(rows.map((row) => row.severity).sort()).toEqual(["major", "minor"]);
+        const again = JSON.parse((await ltm(dir, "validate", "--format", "gitlab")).stdout) as { fingerprint: string }[];
+        expect(again.map((row) => row.fingerprint)).toEqual(rows.map((row) => String(row.fingerprint)));
+        expect(new Set(rows.map((row) => row.fingerprint)).size).toBe(2);
+      });
+    });
+
+    test("junit parses with xml.etree and puts each failure under its own file", async () => {
+      await withScratch(demo, async (dir) => {
+        edit(join(dir, PG), (t) => blockTags(replaceLine(t, "status:", null)));
+        const human = lines((await ltm(dir, "validate")).stdout);
+        expect(human).toHaveLength(2);
+        expect(human.every((l) => l.startsWith(`${PG}:`) && l.includes(" error "))).toBe(true);
+
+        const r = await ltm(dir, "validate", "--format", "junit");
+        expect(r.exitCode).toBe(1);
+        // Prints testcase name and failure count per testcase, so the assertion reads what a JUnit consumer reads.
+        const py = [
+          "import sys, json, xml.etree.ElementTree as E",
+          "root = E.fromstring(sys.stdin.buffer.read())",
+          "cases = root.findall('testcase')",
+          "by = {tc.get('name'): len(tc.findall('failure')) for tc in cases}",
+          "print(json.dumps({'testcases': len(cases), 'failures': len(list(root.iter('failure'))), 'by': by}))",
+        ].join("\n");
+        const p = spawnSync("python3", ["-c", py], { input: r.stdout, encoding: "utf8" });
+        expect(p.stderr).toBe("");
+        expect(p.status).toBe(0);
+        const parsed = JSON.parse(p.stdout) as { testcases: number; failures: number; by: Record<string, number> };
+        expect(parsed.failures).toBe(2);
+        expect(parsed.by[PG]).toBe(2);
+        expect(parsed.by[MYSQL]).toBe(0);
+        expect(parsed.testcases).toBeGreaterThan(2);
+        expect(Object.values(parsed.by).reduce((a, b) => a + b, 0)).toBe(2);
+
+        // Naming two files narrows the Record testcases to them; memory-bank.yaml is always judged, so it keeps its own.
+        const two = await ltm(dir, "validate", "--format", "junit", PG, MYSQL);
+        const q = spawnSync("python3", ["-c", py], { input: two.stdout, encoding: "utf8" });
+        expect(q.status).toBe(0);
+        const named = JSON.parse(q.stdout) as typeof parsed;
+        expect(named.by).toEqual({ [PG]: 2, [MYSQL]: 0, "memory-bank.yaml": 0 });
+        expect(named.failures).toBe(2);
+      });
+    });
+
+    test("--format with --json, or an unknown format, is a usage error", async () => {
+      await withScratch(demo, async (dir) => {
+        expect(await ltm(dir, "validate", "--format", "github", "--json")).toEqual({
+          exitCode: 2,
+          stdout: "",
+          stderr: "ltm validate: --format and --json can't be combined\n",
+        });
+        expect(await ltm(dir, "validate", "--format", "text")).toEqual({
+          exitCode: 2,
+          stdout: "",
+          stderr: "ltm validate: unknown format 'text' (expected github, gitlab, or junit)\n",
+        });
+      });
+    });
+
+    test("a clean Bank gives empty github output, an empty gitlab array, and a failure-free junit suite", async () => {
+      await withScratch(demo, async (dir) => {
+        expect(await ltm(dir, "validate", "--format", "github")).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+        expect(await ltm(dir, "validate", "--format", "gitlab")).toEqual({ exitCode: 0, stdout: "[]\n", stderr: "" });
+        const j = await ltm(dir, "validate", "--format", "junit");
+        expect(j.exitCode).toBe(0);
+        expect(j.stdout).toContain('failures="0"');
+      });
     });
   });
 });

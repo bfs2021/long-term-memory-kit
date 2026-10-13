@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkConfig, checkRecordText, checkUniqueIds, validateBank, type Finding } from "../../src/core/validate.ts";
+import { checkConfig, checkRecordText, checkUniqueIds, validateBank, validateBankReport, type Finding } from "../../src/core/validate.ts";
 import { parseDocument } from "yaml";
+import { run } from "../../src/cli/run.ts";
 import { withScratch } from "../helpers/scratch.ts";
 
 const valid = readFileSync(
@@ -305,7 +306,7 @@ describe("validateBank", () => {
   test("findings come back sorted by file, then line", async () => {
     await withScratch(demoBank, async (dir) => {
       // line-budget is computed before facet-prefix but sits on a later line, so emit order alone would be wrong.
-      const lines = replaceLine(valid, "applies_to:", "applies_to: [serivce:x]").split("\n");
+      const lines = replaceLine(valid, "applies_to:", "applies_to: [domain:commerce, serivce:x]").split("\n");
       const at = lines.indexOf("---", 1);
       lines.splice(at, 0, ...Array.from({ length: 21 - (at + 1) }, (_, i) => `x${i}: v`));
       writeFileSync(join(dir, rel), lines.join("\n"));
@@ -477,6 +478,487 @@ describe("unique-id under named paths", () => {
       expect(validateBank(dir, [copy], dir)).toEqual([
         { file: copy, line: lineOf(valid, "id:"), rule: "unique-id", severity: "error", key: "id", message: `id '${/^id: (.*)$/m.exec(valid)![1]}' is also used by ${rel}` },
       ]);
+    });
+  });
+});
+
+describe("supersession checks", () => {
+  const oldRel = "_memory/decisions/mysql-for-new-services-mB3tR9wZe1.md";
+  const newRel = rel;
+  const supersession = (fs: Finding[]) => fs.filter((f) => f.rule.startsWith("supersession-"));
+
+  // Every mutation is read back before the run that depends on it, so a no-op edit can't pass as green.
+  async function mutate(dir: string, file: string, fn: (text: string) => string): Promise<string> {
+    const before = readFileSync(join(dir, file), "utf8");
+    const after = fn(before);
+    writeFileSync(join(dir, file), after);
+    const read = readFileSync(join(dir, file), "utf8");
+    expect(read).toBe(after);
+    expect(read).not.toBe(before);
+    return read;
+  }
+
+  test("the fixture's superseded pair passes every supersession check", async () => {
+    await withScratch(demoBank, async (dir) => {
+      expect(supersession(validateBankReport(dir, null, dir).findings)).toEqual([]);
+    });
+  });
+
+  test("deleting supersedes from the newer Record is one supersession-incomplete naming both files", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const text = await mutate(dir, newRel, (t) => replaceLine(t, "supersedes:", null));
+      expect(text).not.toContain("supersedes:");
+      const fs = validateBankReport(dir, null, dir).findings;
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-incomplete", severity: "error", file: oldRel, key: "superseded_by" });
+      expect(fs[0]!.line).toBe(lineOf(readFileSync(join(dir, oldRel), "utf8"), "superseded_by:"));
+      expect(`${fs[0]!.file} ${fs[0]!.message}`).toContain(oldRel);
+      expect(`${fs[0]!.file} ${fs[0]!.message}`).toContain(newRel);
+    });
+  });
+
+  test("deleting superseded_by from the older Record is one supersession-incomplete on the newer Record", async () => {
+    await withScratch(demoBank, async (dir) => {
+      await mutate(dir, oldRel, (t) => replaceLine(t, "superseded_by:", null));
+      const fs = validateBankReport(dir, null, dir).findings;
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-incomplete", file: newRel, key: "supersedes" });
+      expect(fs[0]!.message).toContain(oldRel);
+    });
+  });
+
+  test("an older Record that is still accepted gives supersession-status on its status line", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const text = await mutate(dir, oldRel, (t) => replaceLine(t, "status:", "status: accepted"));
+      expect(text).toContain("status: accepted");
+      expect(text).toContain("superseded_by: kQ7vN2xLp4");
+      const fs = validateBankReport(dir, null, dir).findings;
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-status", file: oldRel, key: "status", line: lineOf(text, "status:") });
+    });
+  });
+
+  test("supersession-status falls back to the superseded_by line when status is missing", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const text = await mutate(dir, oldRel, (t) => replaceLine(t, "status:", null));
+      const fs = supersession(validateBankReport(dir, null, dir).findings);
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-status", line: lineOf(text, "superseded_by:") });
+    });
+  });
+
+  test("a made-up superseded_by id is one supersession-missing-target on that key", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const text = await mutate(dir, oldRel, (t) => replaceLine(t, "superseded_by:", "superseded_by: zZ9zZ9zZ9z"));
+      expect(text).toContain("superseded_by: zZ9zZ9zZ9z");
+      const all = supersession(validateBankReport(dir, null, dir).findings);
+      // The newer Record still supersedes the older one, which no longer points back: a second, correct finding.
+      expect(all.map((f) => f.rule).sort()).toEqual(["supersession-incomplete", "supersession-missing-target"]);
+      const fs = all.filter((f) => f.rule === "supersession-missing-target");
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({
+        rule: "supersession-missing-target",
+        file: oldRel,
+        key: "superseded_by",
+        line: lineOf(text, "superseded_by:"),
+        message: "superseded_by names 'zZ9zZ9zZ9z', which no Record has",
+      });
+    });
+  });
+
+  test("a made-up supersedes entry is one supersession-missing-target on that key", async () => {
+    await withScratch(demoBank, async (dir) => {
+      await mutate(dir, newRel, (t) => replaceLine(t, "supersedes:", "supersedes: [mB3tR9wZe1, zZ9zZ9zZ9z]"));
+      const fs = supersession(validateBankReport(dir, null, dir).findings);
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-missing-target", file: newRel, key: "supersedes" });
+      expect(fs[0]!.message).toContain("'zZ9zZ9zZ9z'");
+    });
+  });
+
+  describe("supersession-facets", () => {
+    // A fresh cross-linked pair, so scope is the only thing that can fail.
+    const pair = (oldScope: string | null, newScope: string | null, extra = { old: "", new: "" }) => {
+      const record = (id: string, title: string, status: string, link: string, scope: string | null, more: string) =>
+        [
+          "---",
+          "schema: 1",
+          `id: ${id}`,
+          "memory_type: Decision",
+          `title: ${title}`,
+          `status: ${status}`,
+          "date: 2026-01-01",
+          `summary: ${title}.`,
+          link,
+          // Tied to a fixture PolicyRule so a single `service:` scope doesn't also trip bright-line.
+          "related: [constrained_by::cA9wE6uJr3]",
+          ...(scope === null ? [] : [`applies_to: ${scope}`]),
+          ...(more ? [more] : []),
+          "---",
+          "",
+          "## Context",
+          "c",
+          "",
+          "## Decision",
+          "d",
+          "",
+          "## Consequences",
+          "e",
+          "",
+        ].join("\n");
+      return {
+        old: record("aA1aA1aA1a", "Old way", "superseded", "superseded_by: bB2bB2bB2b", oldScope, extra.old),
+        new: record("bB2bB2bB2b", "New way", "accepted", "supersedes: [aA1aA1aA1a]", newScope, extra.new),
+      };
+    };
+    const oldFile = "_memory/decisions/old-way-aA1aA1aA1a.md";
+    const newFile = "_memory/decisions/new-way-bB2bB2bB2b.md";
+    const run = async (p: { old: string; new: string }) =>
+      withScratch(demoBank, async (dir) => {
+        writeFileSync(join(dir, oldFile), p.old);
+        writeFileSync(join(dir, newFile), p.new);
+        expect(readFileSync(join(dir, oldFile), "utf8")).toBe(p.old);
+        expect(readFileSync(join(dir, newFile), "utf8")).toBe(p.new);
+        return validateBankReport(dir, null, dir).findings;
+      });
+
+    test("disjoint scopes give exactly one supersession-facets finding naming both paths", async () => {
+      const fs = await run(pair("[service:a]", "[service:b]"));
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-facets", file: oldFile, key: "applies_to" });
+      expect(fs[0]!.message).toContain(oldFile);
+      expect(fs[0]!.message).toContain(newFile);
+    });
+
+    test("a shared entry among several passes", async () => {
+      expect(await run(pair("[service:a]", "[service:a, domain:x]"))).toEqual([]);
+    });
+
+    test("a newer Record with no applies_to passes", async () => {
+      expect(await run(pair("[service:a]", null))).toEqual([]);
+    });
+
+    test("an older Record with an empty applies_to passes", async () => {
+      expect(await run(pair("[]", "[service:b]"))).toEqual([]);
+    });
+
+    test("overlapping only tags or only owners still fails", async () => {
+      for (const key of ["tags", "owners"]) {
+        const fs = await run(pair("[service:a]", "[service:b]", { old: `${key}: [team:x]`, new: `${key}: [team:x]` }));
+        expect(fs.map((f) => f.rule)).toEqual(["supersession-facets"]);
+      }
+    });
+  });
+
+  test("an id held by two Records is unique-id's alone: no supersession finding resolves through it", async () => {
+    await withScratch(demoBank, async (dir) => {
+      // The original keeps `supersedes`; the copy shares its id but doesn't list the older Record.
+      const copy = "_memory/decisions/zz-copy.md";
+      const copyText = replaceLine(valid, "supersedes:", null);
+      writeFileSync(join(dir, copy), copyText);
+      const readBack = readFileSync(join(dir, copy), "utf8");
+      expect(readBack).toBe(copyText);
+      expect(readBack).not.toContain("supersedes:");
+      expect(readFileSync(join(dir, newRel), "utf8")).toContain("supersedes:");
+
+      const fs = validateBankReport(dir, null, dir).findings;
+      expect(fs.map((f) => f.rule)).toEqual(["unique-id"]);
+    });
+  });
+
+  test("a duplicated id on the older side stays unique-id's alone too", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const oldText = readFileSync(join(dir, oldRel), "utf8");
+      const copy = "_memory/decisions/zz-old-copy.md";
+      // Disjoint scope on a copy with no superseded_by: it declares no edge, so facets must stay quiet.
+      const copyText = replaceLine(replaceLine(oldText, "superseded_by:", null), "applies_to:", "applies_to: [domain:elsewhere, service:elsewhere]");
+      writeFileSync(join(dir, copy), copyText);
+      const readBack = readFileSync(join(dir, copy), "utf8");
+      expect(readBack).toBe(copyText);
+      expect(readBack).not.toContain("superseded_by:");
+
+      const fs = validateBankReport(dir, null, dir).findings;
+      expect(fs.map((f) => f.rule)).toEqual(["unique-id"]);
+    });
+  });
+
+  test("a duplicated older id still gets supersession-facets per declaring copy, and no supersession-incomplete", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const oldText = readFileSync(join(dir, oldRel), "utf8");
+      const copy = "_memory/decisions/zz-old-copy.md";
+      writeFileSync(join(dir, copy), oldText);
+      expect(readFileSync(join(dir, copy), "utf8")).toBe(oldText);
+      const newText = await mutate(dir, newRel, (t) => replaceLine(replaceLine(t, "supersedes:", null), "applies_to:", "applies_to: [domain:zzz, system:zzz]"));
+      expect(newText).toContain("applies_to: [domain:zzz, system:zzz]");
+      expect(newText).not.toContain("supersedes:");
+
+      const fs = supersession(validateBankReport(dir, null, dir).findings);
+      expect(fs.map((f) => [f.rule, f.file])).toEqual([
+        ["supersession-facets", oldRel],
+        ["supersession-facets", copy],
+      ]);
+    });
+  });
+
+  test("with paths naming only the newer Record, the incomplete finding on the older one still appears", async () => {
+    await withScratch(demoBank, async (dir) => {
+      await mutate(dir, newRel, (t) => replaceLine(t, "supersedes:", null));
+      const fs = validateBankReport(dir, [newRel], dir).findings;
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "supersession-incomplete", file: oldRel });
+    });
+  });
+
+  test("with paths naming an unrelated Record, supersession findings are dropped", async () => {
+    await withScratch(demoBank, async (dir) => {
+      await mutate(dir, newRel, (t) => replaceLine(t, "supersedes:", null));
+      const other = "_memory/decisions/trunk-based-deployment-rX6jK1fWc9.md";
+      expect(validateBankReport(dir, [other], dir).findings).toEqual([]);
+    });
+  });
+});
+
+describe("warnings, Ajv collapse, and the folder-type path", () => {
+  const exceptionRel = "_memory/exceptions/order-service-redis-until-2027-03-wJ3nC7hTy4.md";
+  const decisionRel = "_memory/decisions/postgres-everywhere-kQ7vN2xLp4.md";
+  const only = (fs: Finding[], rule: string) => fs.filter((f) => f.rule === rule);
+
+  // Writes then reads back, so an edit that matched nothing fails here and not as a false green.
+  function edit(dir: string, file: string, fn: (t: string) => string): string {
+    const before = readFileSync(join(dir, file), "utf8");
+    writeFileSync(join(dir, file), fn(before));
+    const after = readFileSync(join(dir, file), "utf8");
+    expect(after).not.toBe(before);
+    return after;
+  }
+
+  describe("bright-line", () => {
+    test("a single service: scope with no related warns on the applies_to line", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, exceptionRel, (t) => replaceLine(t, "related:", null));
+        expect(text).not.toContain("related:");
+        const fs = only(validateBankReport(dir, null, dir).findings, "bright-line");
+        expect(fs).toHaveLength(1);
+        expect(fs[0]!).toMatchObject({
+          file: exceptionRel,
+          severity: "warning",
+          key: "applies_to",
+          line: lineOf(text, "applies_to:"),
+        });
+        expect(fs[0]!.message).toContain("service:order-service");
+      });
+    });
+
+    test("the unmodified Exception, related to a fixture PolicyRule, does not warn", async () => {
+      await withScratch(demoBank, async (dir) => {
+        expect(readFileSync(join(dir, exceptionRel), "utf8")).toContain("related: [constrained_by::cA9wE6uJr3]");
+        expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toEqual([]);
+      });
+    });
+
+    test("relating it to a PolicyRule clears the warning", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, exceptionRel, (t) => replaceLine(t, "related:", null));
+        expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toHaveLength(1);
+        const text = edit(dir, exceptionRel, (t) => replaceLine(t, "applies_to:", "applies_to: [service:order-service]\nrelated: [constrained_by::cA9wE6uJr3]"));
+        expect(text).toContain("related: [constrained_by::cA9wE6uJr3]");
+        expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toEqual([]);
+      });
+    });
+
+    test("relating it to a Decision id instead does not clear it", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, exceptionRel, (t) => replaceLine(t, "related:", "related: [constrained_by::kQ7vN2xLp4]"));
+        expect(text).toContain("related: [constrained_by::kQ7vN2xLp4]");
+        expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toHaveLength(1);
+      });
+    });
+
+    test("a bare PolicyRule id in related (no ::) clears the warning", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, exceptionRel, (t) => replaceLine(t, "related:", "related: [cA9wE6uJr3]"));
+        expect(text).toContain("related: [cA9wE6uJr3]");
+        expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toEqual([]);
+      });
+    });
+
+    test("a domain: scope alone, or service: plus domain:, does not warn", async () => {
+      for (const scope of ["[domain:commerce]", "[service:order-service, domain:commerce]"]) {
+        await withScratch(demoBank, async (dir) => {
+          edit(dir, exceptionRel, (t) => replaceLine(replaceLine(t, "related:", null), "applies_to:", `applies_to: ${scope}`));
+          expect(only(validateBankReport(dir, null, dir).findings, "bright-line")).toEqual([]);
+        });
+      }
+    });
+
+    test("naming a different file drops the warning", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, exceptionRel, (t) => replaceLine(t, "related:", null));
+        expect(only(validateBankReport(dir, [decisionRel], dir).findings, "bright-line")).toEqual([]);
+        expect(only(validateBankReport(dir, [exceptionRel], dir).findings, "bright-line")).toHaveLength(1);
+      });
+    });
+  });
+
+  describe("body-sections", () => {
+    test("'context' in a paragraph without a Context heading warns, naming Context only", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, decisionRel, (t) => replaceLine(t, "## Context", "Some context for this lives in the paragraph below."));
+        expect(text).not.toContain("## Context");
+        const fs = only(validateBankReport(dir, null, dir).findings, "body-sections");
+        expect(fs).toHaveLength(1);
+        expect(fs[0]!).toMatchObject({
+          file: decisionRel,
+          severity: "warning",
+          line: 1,
+          key: null,
+          message: "Decision body has no Context heading",
+        });
+      });
+    });
+
+    test("a Background heading still warns until heading_aliases lists it", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, decisionRel, (t) => replaceLine(t, "## Context", "## Background"));
+        expect(text).toContain("## Background");
+        expect(only(validateBankReport(dir, null, dir).findings, "body-sections")).toHaveLength(1);
+        const cfg = edit(dir, "memory-bank.yaml", (t) => `${t.endsWith("\n") ? t : `${t}\n`}heading_aliases: { Context: [Background] }\n`);
+        expect(cfg).toContain("heading_aliases:");
+        const out = validateBankReport(dir, null, dir).findings;
+        expect(only(out, "body-sections")).toEqual([]);
+        expect(only(out, "config-schema")).toEqual([]);
+      });
+    });
+
+    test("a heading inside a code fence does not count", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, decisionRel, (t) => replaceLine(t, "## Consequences", "```\n## Consequences\n```"));
+        const fs = only(validateBankReport(dir, null, dir).findings, "body-sections");
+        expect(fs.map((f) => f.message)).toEqual(["Decision body has no Consequences heading"]);
+      });
+    });
+
+    test("a heading inside a longer fence stays hidden after an inner shorter fence line", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, decisionRel, (t) => replaceLine(t, "## Context", "````\n```\n## Context\n````"));
+        expect(text).toContain("````\n```\n## Context\n````");
+        const fs = only(validateBankReport(dir, null, dir).findings, "body-sections");
+        expect(fs.map((f) => f.message)).toEqual(["Decision body has no Context heading"]);
+      });
+    });
+
+    test("a heading_aliases list holding a non-string is ignored whole", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, decisionRel, (t) => replaceLine(t, "## Context", "## Background"));
+        edit(dir, "memory-bank.yaml", (t) => `${t.endsWith("\n") ? t : `${t}\n`}heading_aliases: { Context: [Background, 3] }\n`);
+        const fs = only(validateBankReport(dir, null, dir).findings, "body-sections");
+        expect(fs.map((f) => f.message)).toEqual(["Decision body has no Context heading"]);
+      });
+    });
+
+    test("a heading with a closing # sequence counts", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const text = edit(dir, decisionRel, (t) => replaceLine(t, "## Context", "## Context ##"));
+        expect(text).toContain("## Context ##");
+        expect(only(validateBankReport(dir, null, dir).findings, "body-sections")).toEqual([]);
+      });
+    });
+
+    test("missing sections are listed in Context, Decision, Consequences order", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, decisionRel, (t) => `${t.slice(0, t.indexOf("\n---", 4) + 5)}\nJust prose.\n`);
+        const fs = only(validateBankReport(dir, null, dir).findings, "body-sections");
+        expect(fs.map((f) => f.message)).toEqual(["Decision body has no Context, Decision, Consequences heading"]);
+      });
+    });
+
+    test("a Context Record with no headings does not warn", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const ctx = "_memory/context/order-service-overview-gN5yD9sMe2.md";
+        const text = readFileSync(join(dir, ctx), "utf8");
+        expect(text.split("\n").some((l) => l.startsWith("#") && !l.startsWith("# "))).toBe(false);
+        edit(dir, ctx, (t) => `${t.slice(0, t.indexOf("\n---", 4) + 5)}\nNo headings here.\n`);
+        expect(only(validateBankReport(dir, null, dir).findings, "body-sections")).toEqual([]);
+      });
+    });
+  });
+
+  describe("through the CLI", () => {
+    test("one bright-line warning and no errors exits 0 and prints 'warning bright-line'", async () => {
+      await withScratch(demoBank, async (dir) => {
+        edit(dir, exceptionRel, (t) => replaceLine(t, "related:", null));
+        const r = await run({ argv: ["validate"], cwd: dir, env: {} });
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toBe("");
+        const out = r.stdout.split("\n").filter((l) => l !== "");
+        expect(out).toHaveLength(1);
+        expect(out[0]).toContain(" warning bright-line: ");
+      });
+    });
+
+    test("an unmodified demo copy exits 0 with empty stdout", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const r = await run({ argv: ["validate"], cwd: dir, env: {} });
+        expect(r.exitCode).toBe(0);
+        expect(r.stdout).toBe("");
+        expect(r.stderr).toBe("");
+      });
+    });
+  });
+
+  describe("Ajv collapse", () => {
+    test("deciders-nested.md gives exactly one schema finding, on deciders", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const fixture = readFileSync(new URL("../../fixtures/invalid/deciders-nested.md", import.meta.url), "utf8");
+        const file = "_memory/decisions/deciders-nested.md";
+        writeFileSync(join(dir, file), fixture);
+        expect(readFileSync(join(dir, file), "utf8")).toBe(fixture);
+        const fs = validateBankReport(dir, [file], dir).findings.filter((f) => f.file === file && f.rule === "schema");
+        expect(fs).toHaveLength(1);
+        expect(fs[0]!).toMatchObject({ key: "deciders", message: "must be a scalar or a flat list of scalars" });
+      });
+    });
+
+    test("weight: .nan gives exactly one schema finding, on weight", () => {
+      const text = replaceLine(valid, "tags:", "weight: .nan");
+      expect(text).toContain("weight: .nan");
+      const fs = check(text);
+      expect(fs).toHaveLength(1);
+      expect(fs[0]!).toMatchObject({ rule: "schema", key: "weight", line: lineOf(text, "weight:") });
+    });
+
+    test("a missing status is still one required finding", () => {
+      const fs = check(replaceLine(valid, "status:", null));
+      expect(fs.map((f) => f.message)).toEqual(["must have required property 'status'"]);
+    });
+  });
+
+  describe("folder-type names the configured folder (#47)", () => {
+    const asContext = (t: string) => replaceLine(t, "memory_type:", "memory_type: Context");
+
+    test("a Record under decisions/archive names _memory/decisions", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const file = "_memory/decisions/archive/x-xX0xX0xX00.md";
+        mkdirSync(join(dir, "_memory/decisions/archive"));
+        writeFileSync(join(dir, file), asContext(replaceLine(valid, "id:", "id: xX0xX0xX00")));
+        expect(readFileSync(join(dir, file), "utf8")).toContain("memory_type: Context");
+        const fs = validateBankReport(dir, [file], dir).findings.filter((f) => f.rule === "folder-type");
+        expect(fs).toHaveLength(1);
+        expect(fs[0]!.message.endsWith("(_memory/decisions)")).toBe(true);
+      });
+    });
+
+    test("with folders: { Decision: docs/adr } the message ends (docs/adr)", async () => {
+      await withScratch(demoBank, async (dir) => {
+        const file = "docs/adr/archive/x-xX0xX0xX00.md";
+        mkdirSync(join(dir, "docs/adr/archive"), { recursive: true });
+        writeFileSync(join(dir, file), asContext(replaceLine(valid, "id:", "id: xX0xX0xX00")));
+        const cfg = edit(dir, "memory-bank.yaml", (t) => `${t.endsWith("\n") ? t : `${t}\n`}folders: { Decision: docs/adr }\n`);
+        expect(cfg).toContain("folders: { Decision: docs/adr }");
+        const fs = validateBankReport(dir, [file], dir).findings.filter((f) => f.rule === "folder-type");
+        expect(fs).toHaveLength(1);
+        expect(fs[0]!.message.endsWith("(docs/adr)")).toBe(true);
+      });
     });
   });
 });
