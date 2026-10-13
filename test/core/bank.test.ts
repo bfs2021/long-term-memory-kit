@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,81 @@ describe("findBank", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("symlinked memory-bank.yaml (#36)", () => {
+  const refusal = (dir: string) => ({
+    path: join(dir, "memory-bank.yaml"),
+    line: null,
+    message: "memory-bank.yaml is a symlink, not followed",
+  });
+
+  function caught(fn: () => unknown): unknown {
+    try {
+      fn();
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  }
+
+  test.each(["outside", "inside", "dangling"])("findBank throws on a %s symlink and never reaches a parent", async (kind) => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "ltm-linktarget-"));
+    try {
+      await withScratch(demoBank, async (parent) => {
+        const child = join(parent, "nested");
+        mkdirSync(child);
+        const outsideTarget = join(elsewhere, "memory-bank.yaml");
+        await writeFile(outsideTarget, readFileSync(join(demoBank, "memory-bank.yaml")));
+        const target =
+          kind === "outside" ? outsideTarget : kind === "inside" ? join(parent, "memory-bank.yaml") : join(child, "nope.yaml");
+        symlinkSync(target, join(child, "memory-bank.yaml"));
+        const e = caught(() => findBank(child));
+        expect(e).toBeInstanceOf(ConfigError);
+        expect({ path: (e as ConfigError).path, line: (e as ConfigError).line, message: (e as ConfigError).message }).toEqual(refusal(child));
+      });
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  test("loadConfig refuses a symlink the same way", async () => {
+    await withScratch(demoBank, async (dir) => {
+      const real = join(dir, "real.yaml");
+      await writeFile(real, "schema: 1\nname: acme\n");
+      await rm(join(dir, "memory-bank.yaml"));
+      symlinkSync(real, join(dir, "memory-bank.yaml"));
+      const e = caught(() => loadConfig(dir));
+      expect(e).toBeInstanceOf(ConfigError);
+      expect({ path: (e as ConfigError).path, line: (e as ConfigError).line, message: (e as ConfigError).message }).toEqual(refusal(dir));
+    });
+  });
+
+  test("restoring a regular file with the former target's bytes resolves again", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "ltm-linktarget-"));
+    try {
+      await withScratch(demoBank, async (dir) => {
+        const target = join(elsewhere, "memory-bank.yaml");
+        const bytes = readFileSync(join(demoBank, "memory-bank.yaml"));
+        await writeFile(target, bytes);
+        const config = join(dir, "memory-bank.yaml");
+        await rm(config);
+        symlinkSync(target, config);
+        expect(lstatSync(config).isSymbolicLink()).toBe(true);
+        expect(caught(() => findBank(dir))).toBeInstanceOf(ConfigError);
+
+        await rm(config);
+        await writeFile(config, readFileSync(target));
+        expect(lstatSync(config).isFile()).toBe(true);
+        expect(readFileSync(config).equals(readFileSync(target))).toBe(true);
+        expect(findBank(dir)).toBe(dir);
+        expect(loadConfig(dir).raw.name).toBe("acme");
+      });
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
 });
 
 describe("loadConfig", () => {
