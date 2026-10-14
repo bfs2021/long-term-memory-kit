@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import pkg from "../../package.json" with { type: "json" };
 import { ConfigError, loadConfig, MEMORY_TYPES, type BankConfig, type MemoryType } from "../core/bank.ts";
@@ -202,8 +202,14 @@ function configText(name: string, prefixes: string[], folders: Partial<Record<Me
   return `${lines.join("\n")}\n`;
 }
 
+// `_memory/../docs/adr` stores as written but lives at docs/adr; anything that names the path to a
+// formatter or CODEOWNERS has to use where the Records really are.
+function realFolder(config: BankConfig, type: MemoryType): string {
+  return posix.normalize(config.folders[type]);
+}
+
 function overrideFiles(config: BankConfig, templateFiles: unknown): unknown {
-  const folders = MEMORY_TYPES.map((t) => config.folders[t]);
+  const folders = MEMORY_TYPES.map((t) => realFolder(config, t));
   if (folders.every((f) => f.startsWith("_memory/"))) return templateFiles;
   return [...new Set(folders.map((f) => `${f.replace(/\/+$/, "")}/**/*.md`))];
 }
@@ -377,7 +383,12 @@ export const init: Command = {
 
     const owners = join(dir, "CODEOWNERS.example");
     if (!existsSync(owners) && !isLink(owners)) {
-      const lines = MEMORY_TYPES.map((t) => `/${config.folders[t].replace(/\/+$/, "")}/ @your-org/memory-maintainers\n`);
+      // CODEOWNERS matches gitignore-style, so `/./` matches nothing; a Bank-root folder needs `/**`.
+      const pattern = (t: MemoryType) => {
+        const folder = realFolder(config, t).replace(/\/+$/, "");
+        return folder === "." ? "/**" : `/${folder}/`;
+      };
+      const lines = MEMORY_TYPES.map((t) => `${pattern(t)} @your-org/memory-maintainers\n`);
       writeIfChanged(owners, [...new Set(lines)].join(""), null);
     }
 

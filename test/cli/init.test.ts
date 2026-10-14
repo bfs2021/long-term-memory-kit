@@ -217,6 +217,80 @@ describe("ltm init", () => {
   });
 });
 
+describe("ltm init formatter globs", () => {
+  const files = [".prettierrc.json", ".oxfmtrc.json"];
+  const overrideGlobs = (file: string) =>
+    (JSON.parse(read(file)).overrides as { files: string | string[] }[]).flatMap((o) => o.files);
+
+  test.each(files)("--folder through _memory/.. gets the glob of where the Records live (%s)", async (file) => {
+    const r = await init("--folder", "Decision=_memory/../docs/adr");
+    expect(r.exitCode).toBe(0);
+    expect(overrideGlobs(file)).toContain("docs/adr/**/*.md");
+    expect(overrideGlobs(file).filter((g) => g.includes(".."))).toEqual([]);
+  });
+
+  test("--folder through _memory/.. also lands in CODEOWNERS.example as the real path", async () => {
+    const r = await init("--folder", "Decision=_memory/../docs/adr");
+    expect(r.exitCode).toBe(0);
+    expect(read("CODEOWNERS.example").split("\n")[0]).toBe("/docs/adr/ @your-org/memory-maintainers");
+  });
+
+  test("a type folder that normalizes to the Bank root gets /** in CODEOWNERS.example, not /./", async () => {
+    const r = await init("--folder", "Decision=_memory/..");
+    expect(r.exitCode).toBe(0);
+    const lines = read("CODEOWNERS.example").split("\n");
+    expect(lines).toContain("/** @your-org/memory-maintainers");
+    expect(lines.filter((l) => l.startsWith("/./"))).toEqual([]);
+  });
+
+  test.each(files)("a . segment under _memory/ keeps the template glob (%s)", async (file) => {
+    const r = await init("--folder", "Decision=_memory/./adr");
+    expect(r.exitCode).toBe(0);
+    expect(overrideGlobs(file)).toEqual(["_memory/**/*.md"]);
+  });
+
+  test.each(files)("a hand-written memory-bank.yaml folder through _memory/.. gets the same glob (%s)", async (file) => {
+    writeFileSync(join(dir, "memory-bank.yaml"), "schema: 1\nname: acme\nfacet_prefixes: [team]\nfolders:\n  Decision: _memory/../docs/adr\n");
+    const r = await init();
+    expect(r.exitCode).toBe(0);
+    expect(overrideGlobs(file)).toContain("docs/adr/**/*.md");
+    expect(overrideGlobs(file).filter((g) => g.includes(".."))).toEqual([]);
+  });
+
+  test.each(files)("the default layout keeps the template glob (%s)", async (file) => {
+    const r = await init();
+    expect(r.exitCode).toBe(0);
+    expect(overrideGlobs(file)).toEqual(["_memory/**/*.md"]);
+  });
+
+  // Asserts the formatters' output, not the resolved config: the glob is only right if a root Record's
+  // fenced block survives. The default-layout control keeps this from passing on a formatter that formats nothing.
+  test("a Bank-root type folder (_memory/..) keeps a root Record's code block intact in Prettier and oxfmt", async () => {
+    const root = join(import.meta.dir, "../..");
+    const oxfmt = join(root, "node_modules/.bin/oxfmt");
+    const block = "# x\n\n```js\nconst   a  =  {b:1}\n```\n";
+    const control = join(tmp, "control");
+    mkdirSync(control);
+
+    expect((await init("--folder", "Decision=_memory/..")).exitCode).toBe(0);
+    expect((await run({ argv: ["init"], cwd: control, env: {} })).exitCode).toBe(0);
+
+    const formatted = async (cwd: string) => {
+      writeFileSync(join(cwd, "x.md"), block);
+      const options = await prettier.resolveConfig(join(cwd, "x.md"), { editorconfig: false });
+      const viaPrettier = await prettier.format(block, { ...options, filepath: join(cwd, "x.md") });
+      const ox = spawnSync(oxfmt, ["-c", ".oxfmtrc.json", "x.md"], { cwd, encoding: "utf8" });
+      expect(ox.status).toBe(0);
+      return { viaPrettier, viaOxfmt: readFileSync(join(cwd, "x.md"), "utf8") };
+    };
+
+    expect(await formatted(dir)).toEqual({ viaPrettier: block, viaOxfmt: block });
+    const ctl = await formatted(control);
+    expect(ctl.viaPrettier).toContain("const a = { b: 1 };");
+    expect(ctl.viaOxfmt).toContain("const a = { b: 1 };");
+  });
+});
+
 describe("ltm init edges", () => {
   test("text outside the markers survives, and only the region changes", async () => {
     writeFileSync(join(dir, "AGENTS.md"), "# House rules\n\nBe kind.\n");
