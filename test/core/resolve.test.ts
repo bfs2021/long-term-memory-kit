@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigError } from "../../src/core/bank.ts";
 import {
+  identityString,
   loadUserConfig,
   matchRule,
   noBankMessage,
@@ -34,12 +35,48 @@ describe("parseRemote", () => {
     expect(parseRemote(url)).toEqual(want);
   });
 
-  test.each(["ftp://x", "not a url", "", "https://github.com/acme", "https://github.com/a/b/c", "C:/acme/order-service"])(
-    "%p gives null",
-    (url) => {
-      expect(parseRemote(url)).toBeNull();
-    },
-  );
+  test.each(["ftp://x", "not a url", "", "https://github.com/acme"])("%p gives null", (url) => {
+    expect(parseRemote(url)).toBeNull();
+  });
+
+  test.each([
+    ["C:/acme/order-service", "linux"],
+    ["C:/acme/order-service", "win32"],
+    ["C:/x/y", "linux"],
+    ["C:/x/y", "win32"],
+    ["C:acme/order-service", "win32"],
+    ["c:x/y", "win32"],
+    ["x:grp/repo.git", "win32"],
+  ])("%p gives null on %s", (url, platform) => {
+    expect(parseRemote(url, platform)).toBeNull();
+  });
+
+  test.each([
+    ["x:grp/repo.git", { host: "x", org: "grp", repo: "repo" }],
+    ["C:acme/order-service", { host: "c", org: "acme", repo: "order-service" }],
+  ])("%p parses as a host on linux", (url, want) => {
+    expect(parseRemote(url, "linux")).toEqual(want);
+  });
+
+  test.each([
+    ["git@gitlab.com:grp/sub/repo.git", { host: "gitlab.com", org: "grp/sub", repo: "repo" }],
+    ["https://gitlab.com/grp/sub/repo", { host: "gitlab.com", org: "grp/sub", repo: "repo" }],
+    ["github.com:acme/order-service.git", { host: "github.com", org: "acme", repo: "order-service" }],
+    ["ssh://git@github.com/a/b/c/d.git", { host: "github.com", org: "a/b/c", repo: "d" }],
+    ["https://github.com/a/b/c", { host: "github.com", org: "a/b", repo: "c" }],
+    ["work:grp/repo.git", { host: "work", org: "grp", repo: "repo" }],
+    ["gh:acme/order-service", { host: "gh", org: "acme", repo: "order-service" }],
+    ["localhost:a/b", { host: "localhost", org: "a", repo: "b" }],
+    ["https://h.com/a//b", null],
+    ["https://h.com/only", null],
+  ])("%s", (url, want) => {
+    expect(parseRemote(url)).toEqual(want);
+  });
+
+  test("a subgroup identity keeps every org segment", () => {
+    const id = parseRemote("git@gitlab.com:grp/sub/repo.git");
+    expect(id && identityString(id)).toBe("gitlab.com/grp/sub/repo");
+  });
 });
 
 describe("matchRule", () => {
@@ -52,6 +89,11 @@ describe("matchRule", () => {
   test("a lone * matches everything", () => {
     expect(matchRule("*", "github.com/acme/x")).toBe(true);
     expect(matchRule("*", "gitlab.example.com/a/b")).toBe(true);
+  });
+
+  test("a subgroup identity needs a pattern with as many segments", () => {
+    expect(matchRule("gitlab.com/grp/*/*", "gitlab.com/grp/sub/repo")).toBe(true);
+    expect(matchRule("gitlab.com/*/*", "gitlab.com/grp/sub/repo")).toBe(false);
   });
 });
 
@@ -165,6 +207,25 @@ describe("loadUserConfig", () => {
     expect(config?.default).toBe("personal");
   });
 
+  test("a ~/ path falls back to USERPROFILE when HOME is unset", () => {
+    writeFileSync(configPath, exampleConfig);
+    const { config } = loadUserConfig({ LTM_CONFIG: configPath, USERPROFILE: home });
+    expect(config?.banks.acme?.path).toBe(join(home, "banks", "acme"));
+  });
+
+  test("HOME wins over USERPROFILE for a ~/ path", () => {
+    writeFileSync(configPath, exampleConfig);
+    const { config } = loadUserConfig({ LTM_CONFIG: configPath, HOME: home, USERPROFILE: join(tmp, "decoy") });
+    expect(config?.banks.acme?.path).toBe(join(home, "banks", "acme"));
+  });
+
+  test("a ~/ path with neither HOME nor USERPROFILE throws ConfigError", () => {
+    writeFileSync(configPath, exampleConfig);
+    const e = configErrorOf(() => loadUserConfig({ LTM_CONFIG: configPath }));
+    expect(e.path).toBe(configPath);
+    expect(e.message).toContain("needs HOME or USERPROFILE, and neither is set");
+  });
+
   test("a relative path resolves against the config file's directory", () => {
     writeFileSync(configPath, "banks:\n  acme: { path: home/banks/acme }\n");
     expect(loadUserConfig(env).config?.banks.acme?.path).toBe(join(tmp, "home", "banks", "acme"));
@@ -194,7 +255,8 @@ describe("loadUserConfig", () => {
     expect(e.line).toBe(4);
   });
 
-  test.each(["github.com/acme", "github.com/acme/order-service/extra", "github.com//order-service", "a/b/"])(
+  // A four-segment match can match a subgroup identity, so it is not on this list.
+  test.each(["github.com/acme", "github.com//order-service", "a/b/", "gitlab.com/grp//repo"])(
     "a rule match that can never match (%s) fails, naming rules.0.match",
     (match) => {
       writeFileSync(configPath, `banks:\n  acme: { path: x }\nrules:\n  - { match: "${match}", bank: acme }\n`);
@@ -207,6 +269,11 @@ describe("loadUserConfig", () => {
   test("a lone * and a three-segment wildcard pattern still load", () => {
     writeFileSync(configPath, 'banks:\n  acme: { path: x }\nrules:\n  - { match: "*", bank: acme }\n  - { match: "github.com/*/order-*", bank: acme }\n');
     expect(loadUserConfig(env).config?.rules).toHaveLength(2);
+  });
+
+  test.each(["gitlab.com/grp/sub/repo", "gitlab.com/grp/*/*"])("a subgroup match (%s) loads", (match) => {
+    writeFileSync(configPath, `banks:\n  acme: { path: x }\nrules:\n  - { match: "${match}", bank: acme }\n`);
+    expect(loadUserConfig(env).config?.rules).toEqual([{ match, bank: "acme" }]);
   });
 
   test("a default naming an unknown Bank fails, naming default", () => {
@@ -351,5 +418,56 @@ describe("resolveBankFlag", () => {
 
   test("neither a name nor a Bank path throws ConfigError", () => {
     expect(() => resolveBankFlag("nope", repo, env)).toThrow(ConfigError);
+  });
+
+  test("a leading ~/ expands under HOME, as user-config paths do", () => {
+    const b = resolveBankFlag("~/banks/acme", repo, env);
+    expect(b.name).toBe("acme");
+    expect(b.root).toBe(join(home, "banks", "acme"));
+  });
+
+  test("a bare ~ resolves HOME itself", () => {
+    writeFileSync(join(home, "memory-bank.yaml"), readFileSync(join(home, "banks", "acme", "memory-bank.yaml"), "utf8"));
+    expect(resolveBankFlag("~", repo, env).root).toBe(home);
+  });
+
+  test("~ with HOME unset throws ConfigError naming --bank once", () => {
+    const e = configErrorOf(() => resolveBankFlag("~/banks/acme", repo, { LTM_CONFIG: configPath }));
+    expect(e.path).toBe("--bank");
+    expect(e.message).toBe("'~/banks/acme' needs HOME or USERPROFILE, and neither is set");
+  });
+
+  test("~/ falls back to USERPROFILE when HOME is unset", () => {
+    const b = resolveBankFlag("~/banks/acme", repo, { LTM_CONFIG: configPath, USERPROFILE: home });
+    expect(b.root).toBe(join(home, "banks", "acme"));
+  });
+
+  test("~/ falls back to USERPROFILE when HOME is empty", () => {
+    const b = resolveBankFlag("~/banks/acme", repo, { LTM_CONFIG: configPath, HOME: "", USERPROFILE: home });
+    expect(b.root).toBe(join(home, "banks", "acme"));
+  });
+
+  test("HOME wins over USERPROFILE", () => {
+    const decoy = join(tmp, "decoy");
+    const b = resolveBankFlag("~/banks/acme", repo, { LTM_CONFIG: configPath, HOME: home, USERPROFILE: decoy });
+    expect(b.root).toBe(join(home, "banks", "acme"));
+  });
+
+  test("~user/x is not expanded, matching user-config paths", () => {
+    const e = configErrorOf(() => resolveBankFlag("~user/x", repo, env));
+    expect(e.message).toContain("neither a Bank");
+  });
+
+  test("a user-config Bank literally named ~x resolves by name before any expansion", () => {
+    writeFileSync(configPath, "banks:\n  ~x: { path: ~/banks/acme }\n");
+    const b = resolveBankFlag("~x", repo, env);
+    expect(b.root).toBe(join(home, "banks", "acme"));
+  });
+
+  // These names would expand, so only the lookup-before-expansion order lets them win.
+  test.each(["~", "~/banks/acme"])("a user-config Bank named %p resolves by name, not under HOME", (name) => {
+    const other = makeBank("other");
+    writeFileSync(configPath, `banks:\n  "${name}": { path: ${other} }\n`);
+    expect(resolveBankFlag(name, repo, env).root).toBe(other);
   });
 });

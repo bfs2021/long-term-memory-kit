@@ -39,21 +39,23 @@ const firstLine = (s: string): string => s.split("\n")[0] ?? s;
 const stripGit = (s: string): string => (s.endsWith(".git") ? s.slice(0, -4) : s);
 
 function identityFromPath(host: string, path: string): RemoteIdentity | null {
+  // GitLab subgroups nest arbitrarily deep, so org is every segment before the repo. Keyed on path shape only: any host may nest.
   const segs = path.replace(/^\/+/, "").replace(/\/+$/, "").split("/");
-  if (segs.length !== 2) return null;
-  const org = segs[0] ?? "";
-  const repo = stripGit(segs[1] ?? "");
-  if (host === "" || org === "" || repo === "") return null;
-  return { host: host.toLowerCase(), org, repo };
+  if (segs.length < 2) return null;
+  const repo = stripGit(segs.pop() ?? "");
+  if (host === "" || repo === "" || segs.some((seg) => seg === "")) return null;
+  return { host: host.toLowerCase(), org: segs.join("/"), repo };
 }
 
-export function parseRemote(url: string): RemoteIdentity | null {
+export function parseRemote(url: string, platform: string = process.platform): RemoteIdentity | null {
   const s = url.trim();
   if (/\s/.test(s)) return null;
-  // scp-like syntax has no scheme, so URL can't parse it. Requiring `user@` keeps a
-  // Windows path such as C:/x from reading as host C.
-  const scp = /^[^@/:]+@([^/:]+):(?!\/)(.+)$/.exec(s);
-  if (scp) return identityFromPath(scp[1] ?? "", scp[2] ?? "");
+  // scp-like syntax has no scheme, so URL can't parse it. The single-letter guard is Windows-only, since drive paths (C:x) exist only there and git on POSIX reads x:path as host x.
+  const scp = /^(?:([^@/:]+)@)?([^@/:]+):(?!\/)(.+)$/.exec(s);
+  const scpHost = scp?.[2] ?? "";
+  if (scp && (scp[1] !== undefined || platform !== "win32" || !/^[A-Za-z]$/.test(scpHost))) {
+    return identityFromPath(scpHost, scp[3] ?? "");
+  }
   let parsed: URL;
   try {
     parsed = new URL(s);
@@ -167,12 +169,17 @@ function readOptional(path: string): string | null {
   }
 }
 
+// One `~` rule for user-config paths and `--bank`, so the two can't drift. Only `~` and `~/…` expand; `~user` stays literal. Three states because callers differ on the first: undefined (not a tilde value) falls back to a config-relative path in expandPath and to cwd in resolveBankFlag; null means neither HOME nor USERPROFILE is set. Windows cmd and PowerShell set USERPROFILE but not HOME, so it's the fallback; HOME wins when both exist, so POSIX behaves as before.
+function expandTilde(p: string, env: Env): string | null | undefined {
+  if (p !== "~" && !p.startsWith("~/")) return undefined;
+  const home = env.HOME || env.USERPROFILE;
+  if (!home) return null;
+  return join(home, p.slice(1));
+}
+
 function expandPath(p: string, configPath: string, env: Env): string | null {
-  if (p === "~" || p.startsWith("~/")) {
-    if (!env.HOME) return null;
-    return join(env.HOME, p.slice(1));
-  }
-  return resolve(dirname(configPath), p);
+  const expanded = expandTilde(p, env);
+  return expanded !== undefined ? expanded : resolve(dirname(configPath), p);
 }
 
 // An env with nothing to locate a config by (cron, a bare `env -i`) reads like a
@@ -209,7 +216,7 @@ export function loadUserConfig(env: Env): LoadedUserConfig {
   for (const [name, b] of Object.entries(raw.banks ?? {})) {
     const line = lineAt(doc, lc, ["banks", name, "path"]);
     const root = expandPath(b.path, path, env);
-    if (root === null) throw new ConfigError(path, line, `banks.${name}.path: '${b.path}' needs HOME, which is not set`);
+    if (root === null) throw new ConfigError(path, line, `banks.${name}.path: '${b.path}' needs HOME or USERPROFILE, and neither is set`);
     banks[name] = { path: root, url: b.url ?? null, line };
   }
   const known = (name: string): boolean => Object.hasOwn(banks, name);
@@ -312,7 +319,11 @@ export function resolveBankFlag(value: string, cwd: string, env: Env): ResolvedB
   const user = loadUserConfig(env);
   const banks = user.config?.banks ?? {};
   if (Object.hasOwn(banks, value)) return openBank(value, banks[value] as UserBank, user.path);
-  const root = resolve(cwd, value);
+  // The shell expands an unquoted `~` but not `--bank=~/x` or a quoted value. This runs after the name lookup so a Bank literally named `~` or `~/x` still wins.
+  const expanded = expandTilde(value, env);
+  // The path slot already renders as `--bank`, so the message doesn't repeat it.
+  if (expanded === null) throw new ConfigError("--bank", null, `'${value}' needs HOME or USERPROFILE, and neither is set`);
+  const root = expanded ?? resolve(cwd, value);
   const cfg = join(root, BANK_CONFIG);
   try {
     lstatSync(cfg);
