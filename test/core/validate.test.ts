@@ -962,3 +962,92 @@ describe("warnings, Ajv collapse, and the folder-type path", () => {
     });
   });
 });
+
+describe("checkRecordText: values JSON can't carry exactly", () => {
+  const withKey = (line: string) => {
+    const ls = valid.split("\n");
+    ls.splice(ls.indexOf("---", 1), 0, line);
+    return ls.join("\n");
+  };
+
+  test("an integer past the safe range is one schema finding on its own line", () => {
+    const text = withKey("big: 9007199254740993");
+    const fs = check(text);
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: "big", line: lineOf(text, "big:") });
+    expect(fs[0]!.message).toContain("integer outside the safe range");
+  });
+
+  test("a float spelling that rounds on parse is one schema finding on its own line", () => {
+    const text = withKey("big: 9.007199254740993e15");
+    const fs = check(text);
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: "big", line: lineOf(text, "big:") });
+    expect(fs[0]!.message).toContain("number rounded on parse");
+  });
+
+  test("two unsafe integers under one key still give one finding", () => {
+    const fs = check(withKey("big: [9007199254740993, 9007199254740995]"));
+    expect(fs.filter((f) => f.key === "big")).toHaveLength(1);
+  });
+
+  test(".nan stays the single finding checkSchema already gave", () => {
+    const text = withKey("weight: .nan");
+    const fs = check(text).filter((f) => f.key === "weight");
+    expect(fs).toHaveLength(1);
+    expect(fs[0]!.rule).toBe("schema");
+    expect(fs[0]!.line).toBe(lineOf(text, "weight:"));
+    expect(fs[0]!.message).not.toContain("not a finite number");
+  });
+
+  test("a !!timestamp stays the single finding checkSchema already gave", () => {
+    const text = withKey("when: !!timestamp 2001-12-14");
+    const fs = check(text).filter((f) => f.key === "when");
+    expect(fs).toHaveLength(1);
+    expect(fs[0]!.rule).toBe("schema");
+    expect(fs[0]!.message).not.toContain("timestamp");
+  });
+
+  test("a float negative zero is one schema finding on its own line", () => {
+    const text = withKey("z: -0.0");
+    const fs = check(text);
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: "z", line: lineOf(text, "z:") });
+    expect(fs[0]!.message).toContain("negative zero");
+  });
+
+  test("a frontmatter that is itself a !!set is one schema finding on line 1 with no key", () => {
+    const text = valid.replace(/^---\n[\s\S]*?\n---\n/, "---\n!!set\n? a\n? b\n---\n");
+    const fs = check(text).filter((f) => f.message.includes("JSON can't carry it exactly"));
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: null, line: 1, message: "set; JSON can't carry it exactly" });
+  });
+
+  test("!!omap, !!binary, and !!timestamp roots stop at the frontmatter rule with no representability finding", () => {
+    for (const root of ["!!omap\n- a: 1\n- b: 2", "!!binary aGVsbG8=", "!!timestamp 2001-12-14"]) {
+      const fs = check(valid.replace(/^---\n[\s\S]*?\n---\n/, `---\n${root}\n---\n`));
+      expect(fs.map((f) => f.rule)).toEqual(["frontmatter"]);
+      expect(fs.some((f) => f.message.includes("JSON can't carry"))).toBe(false);
+    }
+  });
+
+  test("a rounded float merged in through !!merge <<: is one schema finding on line 1", () => {
+    const text = withKey("!!merge <<: {x: 9007199254740993.0}");
+    const fs = check(text);
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: "<<", line: 1 });
+    expect(fs[0]!.message).toContain("number rounded on parse");
+  });
+
+  test("an alias to a rounded scalar anchored on a mapping key is one schema finding on the alias line", () => {
+    const text = withKey("? &n 9007199254740993.0\n: marker\nx: *n");
+    const fs = check(text);
+    expect(fs).toHaveLength(1);
+    expect(fs[0]).toMatchObject({ rule: "schema", severity: "error", key: "x", line: lineOf(text, "x:") });
+    expect(fs[0]!.message).toContain("number rounded on parse");
+  });
+
+  test("the largest safe integer gives no finding", () => {
+    expect(check(withKey("ok: 9007199254740991"))).toEqual([]);
+  });
+});

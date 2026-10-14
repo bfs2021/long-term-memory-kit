@@ -5,7 +5,7 @@ import addFormatsModule from "ajv-formats";
 import { isMap, isScalar, isSeq, parseDocument, type Document, type Pair } from "yaml";
 import { ConfigError, isInside, loadConfig, type BankConfig, type MemoryType } from "./bank.ts";
 import { listRecordFiles } from "./query.ts";
-import { splitFrontmatter } from "./record.ts";
+import { splitFrontmatter, unrepresentable, type Unrepresentable } from "./record.ts";
 
 export type Rule =
   | "config-schema"
@@ -145,6 +145,25 @@ function checkSchema({ rel, data, lineOf }: Frontmatter): Finding[] {
   });
 }
 
+// A value JSON can't carry exactly is a schema error too, but only on a key checkSchema didn't already flag. `.nan`, `!!binary`, and `!!timestamp` already fail the schema, and a second finding would report one problem twice (#44). In practice that leaves the unsafe integer, `-0.0`, and a float spelling that rounds on parse.
+function checkUnrepresentable({ rel, src, lineOf }: Frontmatter, flagged: ReadonlySet<string | null>): Finding[] {
+  let found: Unrepresentable[];
+  try {
+    found = unrepresentable(src);
+  } catch {
+    // The source already parsed once; a throw here is another reader's failure to report, not a finding.
+    return [];
+  }
+  const out: Finding[] = [];
+  const seen = new Set<string | null>();
+  for (const { key, reason } of found) {
+    if (flagged.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(finding(rel, lineOf(key), "schema", key, `${reason}; JSON can't carry it exactly`));
+  }
+  return out;
+}
+
 function checkCanonicalLists({ rel, src, keys }: Frontmatter): Finding[] {
   const out: Finding[] = [];
   for (const [name, { line, pair }] of keys) {
@@ -260,8 +279,10 @@ function analyzeRecord(
 ): RecordResult {
   const { findings, fm } = checkFrontmatter(rel, text);
   if (!fm) return { findings, id: null, idLine: 1, fm: null };
+  const schema = checkSchema(fm);
   findings.push(
-    ...checkSchema(fm),
+    ...schema,
+    ...checkUnrepresentable(fm, new Set(schema.map((f) => f.key))),
     ...checkCanonicalLists(fm),
     ...checkLineBudget(fm),
     ...checkFolderType(fm, folderType, opts.folderPath),

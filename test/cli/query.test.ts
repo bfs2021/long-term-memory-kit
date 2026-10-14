@@ -185,6 +185,78 @@ describe("ltm query", () => {
     });
   });
 
+  describe("frontmatter JSON can't carry exactly (#44)", () => {
+    const PG = "_memory/decisions/postgres-everywhere-kQ7vN2xLp4.md";
+    const addFrontmatter = (dir: string, lines: string[]) => {
+      const file = join(dir, PG);
+      const src = readFileSync(file, "utf8");
+      const end = src.indexOf("\n---\n", 4);
+      writeFileSync(file, `${src.slice(0, end)}\n${lines.join("\n")}${src.slice(end)}`);
+    };
+
+    test("NaN, an unsafe integer, and !!binary skip the Record on stderr and drop its row", async () => {
+      await withScratch(demo, async (dir) => {
+        addFrontmatter(dir, ["weight: .nan", "big: 9007199254740993", "blob: !!binary aGVsbG8="]);
+        const r = await ltm(dir, "query", "--json", "id=kQ7vN2xLp4");
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toContain(`ltm query: skipped ${PG}:`);
+        const rows = JSON.parse(r.stdout) as { id?: string }[];
+        expect(rows.some((row) => row.id === "kQ7vN2xLp4")).toBe(false);
+      });
+    });
+
+    test("a float spelling that rounds on parse skips the Record and names the reason", async () => {
+      await withScratch(demo, async (dir) => {
+        addFrontmatter(dir, ["big: 9007199254740993.0"]);
+        const r = await ltm(dir, "query", "--json", "id=kQ7vN2xLp4");
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toContain(`ltm query: skipped ${PG}:`);
+        expect(r.stderr).toContain("number rounded on parse");
+        const rows = JSON.parse(r.stdout) as { id?: string }[];
+        expect(rows.some((row) => row.id === "kQ7vN2xLp4")).toBe(false);
+      });
+    });
+
+    test("a !!timestamp skips the Record on stderr and drops its row", async () => {
+      await withScratch(demo, async (dir) => {
+        addFrontmatter(dir, ["when: !!timestamp 2001-12-14"]);
+        const r = await ltm(dir, "query", "--json", "id=kQ7vN2xLp4");
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toContain(`ltm query: skipped ${PG}:`);
+        const rows = JSON.parse(r.stdout) as { id?: string }[];
+        expect(rows.some((row) => row.id === "kQ7vN2xLp4")).toBe(false);
+      });
+    });
+
+    test("a frontmatter that is itself a !!set skips the Record and names the root", async () => {
+      await withScratch(demo, async (dir) => {
+        const before = await ltm(dir, "query", "--json");
+        const file = join(dir, PG);
+        const src = readFileSync(file, "utf8");
+        const end = src.indexOf("\n---\n", 4);
+        writeFileSync(file, `---\n!!set\n? a\n? b${src.slice(end)}`);
+        const r = await ltm(dir, "query", "--json");
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toBe(`ltm query: skipped ${PG}: frontmatter can't be represented in JSON: set\n`);
+        const rows = JSON.parse(r.stdout) as unknown[];
+        expect(rows).toHaveLength((JSON.parse(before.stdout) as unknown[]).length - 1);
+      });
+    });
+
+    test("an ordinary integer and float still print with their values intact", async () => {
+      await withScratch(demo, async (dir) => {
+        addFrontmatter(dir, ["n: 3", "f: 1.5"]);
+        const r = await ltm(dir, "query", "--json", "id=kQ7vN2xLp4");
+        expect(r.exitCode).toBe(0);
+        expect(r.stderr).toBe("");
+        const rows = JSON.parse(r.stdout) as Record<string, unknown>[];
+        expect(rows).toHaveLength(1);
+        expect(JSON.stringify(rows[0])).toMatch(/"n":3[,}]/);
+        expect(JSON.stringify(rows[0])).toMatch(/"f":1\.5[,}]/);
+      });
+    });
+  });
+
   test("no matches prints nothing and exits 0", async () => {
     await withScratch(demo, async (dir) => {
       const r = await ltm(dir, "query", "status=nonexistent-status");
