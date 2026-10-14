@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { toGithub, toGitlab, toJunit } from "../../src/core/report.ts";
 import type { Finding } from "../../src/core/validate.ts";
 
@@ -66,6 +67,48 @@ describe("toGitlab", () => {
 
   test("no findings give an empty JSON array", () => {
     expect(JSON.parse(toGitlab([]))).toEqual([]);
+  });
+
+  const fps = (list: Finding[]): string[] => (JSON.parse(toGitlab(list)) as { fingerprint: string }[]).map((r) => r.fingerprint);
+
+  test("same rule, file, and key on different lines get different fingerprints, whatever the input order", () => {
+    const a = err({ line: 4, message: "first" });
+    const b = err({ line: 9, message: "second" });
+    const [fa, fb] = fps([a, b]);
+    expect(fa).not.toBe(fb);
+    const [rb, ra] = fps([b, a]);
+    expect(ra).toBe(fa);
+    expect(rb).toBe(fb);
+  });
+
+  test("same line, different messages: distinct fingerprints, same result in either input order", () => {
+    const a = err({ message: "alpha" });
+    const b = err({ message: "beta" });
+    const [fa, fb] = fps([a, b]);
+    expect(fa).not.toBe(fb);
+    const [rb, ra] = fps([b, a]);
+    expect(ra).toBe(fa);
+    expect(rb).toBe(fb);
+  });
+
+  test("messages tie-break in code-unit order, not locale order", () => {
+    // localeCompare puts "a" before "B"; code units put "B" (0x42) before "a" (0x61).
+    // Expected hashes come from the requirement's input string, not from toGitlab.
+    const sha = (index: number): string =>
+      createHash("sha256").update(`schema\0a.md\0status\0${index}`).digest("hex");
+    const [upper, lower] = fps([err({ message: "B" }), err({ message: "a" })]);
+    expect(upper).toBe(sha(0));
+    expect(lower).toBe(sha(1));
+    expect(fps([err({ message: "a" }), err({ message: "B" })])).toEqual([sha(1), sha(0)]);
+  });
+
+  test("a lone finding keeps its fingerprint when its line moves", () => {
+    expect(fps([err({ line: 6 })])).toEqual(fps([err({ line: 3 })]));
+  });
+
+  test("output order follows input order", () => {
+    const rows = JSON.parse(toGitlab([err({ line: 9 }), err({ line: 4 })])) as { location: { lines: { begin: number } } }[];
+    expect(rows.map((r) => r.location.lines.begin)).toEqual([9, 4]);
   });
 });
 
