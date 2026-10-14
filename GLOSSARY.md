@@ -48,6 +48,14 @@ _Avoid_: Background, fact
 The one frontmatter layout every record is written in: flat values, lists on a single line, and a header that closes early enough for a cheap read.
 _Avoid_: Normalized form, house style
 
+**Retired**:
+A record whose `status` is `superseded`, `deprecated`, or `rejected`. Queries leave retired records out unless you ask for them.
+_Avoid_: Archived, inactive, dead
+
+**Org-wide**:
+A record whose `applies_to` is missing, `null`, or `[]`. It falls inside every facet, so it matches every facet query and every supersession scope check.
+_Avoid_: Global, unscoped, universal
+
 ### Lifecycle
 
 **Proposal**:
@@ -69,3 +77,7 @@ _Avoid_: Upstreaming, escalation
 **Hydration**:
 Drafting proposals from existing material such as ADRs, transcripts, PRDs, and pull requests. A person reviews every proposal.
 _Avoid_: Ingestion, import, seeding
+
+**Hydration source**:
+A local file that hydration reads, which `ltm discover` classifies as `adr`, `pr`, `transcript`, `prd`, or `document`.
+_Avoid_: Input, seed file, raw material
