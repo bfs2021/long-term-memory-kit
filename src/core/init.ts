@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import agentsTemplate from "../../templates/init/agents-region.md" with { type: "text" };
 import { MEMORY_TYPES, type BankConfig } from "./bank.ts";
 
 export const DEFAULT_FACET_PREFIXES: readonly string[] = ["service", "domain", "system", "team", "platform"];
@@ -14,10 +14,6 @@ export const COPILOT_REGION = "Follow AGENTS.md at the repo root to read and pro
 
 const BEGIN_LINE = /^<!-- ltm:generated:begin v\S+ -->\r?$/;
 const END_LINE = /^<!-- ltm:generated:end -->\r?$/;
-
-let agentsTemplate: string | undefined;
-const loadAgentsTemplate = (): string =>
-  (agentsTemplate ??= readFileSync(new URL("../../templates/init/agents-region.md", import.meta.url), "utf8"));
 
 // Bare when every char is shell-inert, so the common `_memory/...` paths read cleanly.
 function shq(s: string): string {
@@ -93,7 +89,7 @@ export function renderAgentsRegion(
     prefixes: prefixes.length ? prefixes.map((p) => `\`${p}\``).join(", ") : "none yet",
     fields,
   };
-  return loadAgentsTemplate().replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+  return agentsTemplate.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
     const value = values[key];
     if (value === undefined) throw new Error(`agents-region.md: unknown placeholder {{${key}}}`);
     return value;
