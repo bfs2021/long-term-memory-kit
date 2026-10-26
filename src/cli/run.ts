@@ -25,7 +25,7 @@ export type Command = {
   // `variadic` is honored only on the last entry; earlier entries are ignored for it.
   positionals?: { name: string; required: boolean; variadic?: true }[];
   checkArgs?(positionals: string[], values: CommandContext["values"]): string | undefined;
-  // A planned command holds its slot in commands.ts before it works; --help leaves it out.
+  // A planned command holds its slot in commands.ts before it works; top-level --help leaves it out.
   hidden?: true;
   run(ctx: CommandContext): Promise<0 | 1>;
 };
@@ -35,6 +35,23 @@ const usageError = (stderr: string): RunResult => ({ exitCode: 2, stdout: "", st
 function helpText(commands: Command[]): string {
   const lines = commands.filter((c) => !c.hidden).map((c) => `  ${c.name}  ${c.summary}`);
   return ["Usage: ltm <command> [options]", ...lines].join("\n") + "\n";
+}
+
+function commandHelp(cmd: Command): string {
+  const positionals = (cmd.positionals ?? []).map((p, i, all) => {
+    const dots = p.variadic && i === all.length - 1 ? "..." : "";
+    return p.required ? `<${p.name}${dots}>` : `[${p.name}${dots}]`;
+  });
+  const options = Object.entries(cmd.options ?? {});
+  const usage = ["Usage: ltm", cmd.name, ...positionals, ...(options.length ? ["[options]"] : [])];
+  const lines = [usage.join(" "), cmd.summary];
+  if (options.length) {
+    const flags = options.map(([key, o]) => [`--${key}${o.type === "string" ? " <value>" : ""}`, o] as const);
+    const width = Math.max(...flags.map(([f]) => f.length)) + 2;
+    lines.push("", "Options:");
+    for (const [flag, o] of flags) lines.push(`  ${o.multiple ? flag.padEnd(width) + "(repeatable)" : flag}`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 export async function run(
@@ -58,6 +75,12 @@ export async function run(
   if (!cmd) {
     const kind = head.startsWith("-") ? "option" : "command";
     return usageError(`ltm: unknown ${kind} '${head}'\nRun 'ltm --help' for usage.\n`);
+  }
+
+  // Scan stops at `--` so `ltm query -- --help` stays a positional filter.
+  const sep = rest.indexOf("--");
+  if ((sep === -1 ? rest : rest.slice(0, sep)).some((a) => a === "--help" || a === "-h")) {
+    return { exitCode: 0, stdout: commandHelp(cmd), stderr: "" };
   }
 
   // Exit 2 is decided here, before the command runs (parseArgs, the positional
