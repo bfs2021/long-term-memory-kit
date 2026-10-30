@@ -277,3 +277,71 @@ describe("run <command> --help", () => {
     expect(r.stdout).toContain("Usage: ltm ghost");
   });
 });
+
+describe("run did-you-mean", () => {
+  test("a one-edit command typo suggests the command", async () => {
+    const r = await run({ ...base, argv: ["quer"] });
+    expect(r).toEqual({
+      exitCode: 2,
+      stdout: "",
+      stderr: "ltm: unknown command 'quer'\nDid you mean 'query'?\nRun 'ltm --help' for usage.\n",
+    });
+  });
+
+  test("a command 3 edits from every candidate prints no suggestion", async () => {
+    const r = await run({ ...base, argv: ["frob"] });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("ltm: unknown command 'frob'\nRun 'ltm --help' for usage.\n");
+  });
+
+  test("a leading-option typo suggests --version", async () => {
+    const r = await run({ ...base, argv: ["--verison"] });
+    expect(r.stderr).toBe("ltm: unknown option '--verison'\nDid you mean '--version'?\nRun 'ltm --help' for usage.\n");
+  });
+
+  test("an option typo suggests the command's own option", async () => {
+    const r = await run({ ...base, argv: ["query", "--facets", "x"] });
+    expect(r).toEqual({
+      exitCode: 2,
+      stdout: "",
+      stderr: "ltm query: Unknown option '--facets'.\nDid you mean '--facet'?\n",
+    });
+  });
+
+  test("an option typo gets no suggestion when only another command has the option", async () => {
+    const r = await run({ ...base, argv: ["doctor", "--facets"] });
+    expect(r).toEqual({
+      exitCode: 2,
+      stdout: "",
+      stderr:
+        "ltm doctor: Unknown option '--facets'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- \"--facets\"\n",
+    });
+  });
+
+  test("an option typo with =value is compared without the value", async () => {
+    const r = await run({ ...base, argv: ["query", "--facets=x"] });
+    expect(r.stderr).toContain("Did you mean '--facet'?");
+  });
+
+  test("a hidden command is never suggested, and is once unhidden", async () => {
+    const hidden: Command = { ...stub("secret"), hidden: true };
+    const quiet = await run({ ...base, argv: ["secre"] }, [stub("alpha"), hidden]);
+    expect(quiet.exitCode).toBe(2);
+    expect(quiet.stderr).toBe("ltm: unknown command 'secre'\nRun 'ltm --help' for usage.\n");
+    const loud = await run({ ...base, argv: ["secre"] }, [stub("alpha"), stub("secret")]);
+    expect(loud.stderr).toContain("Did you mean 'secret'?");
+  });
+
+  test("ties are all named, in list order", async () => {
+    const r = await run({ ...base, argv: ["abc"] }, [stub("abd"), stub("abf")]);
+    expect(r.stderr).toBe("ltm: unknown command 'abc'\nDid you mean 'abd' or 'abf'?\nRun 'ltm --help' for usage.\n");
+    const three = await run({ ...base, argv: ["abc"] }, [stub("abd"), stub("abf"), stub("abg")]);
+    expect(three.stderr).toContain("Did you mean 'abd', 'abf', or 'abg'?");
+  });
+
+  test("a parse error that isn't an unknown option prints as before", async () => {
+    const r = await run({ ...base, argv: ["query", "--type"] });
+    expect(r).toEqual({ exitCode: 2, stdout: "", stderr: "ltm query: Option '--type <value>' argument missing\n" });
+  });
+});
