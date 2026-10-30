@@ -38,6 +38,8 @@ When results come from more than one Bank, keep each path with its Bank's name a
 
 Read the whole file only for the Records that still look relevant.
 
+Over MCP, use the `read` tool for this. It returns a Record's whole file, frontmatter and body, and takes an `id` or a `path`, not both. It follows the same `bank` rule as `head`.
+
 ## By Hand
 
 Without `ltm`, run the same funnel with a shell. Run each command from the Bank root, where `_memory/` holds one folder for each memory type.
