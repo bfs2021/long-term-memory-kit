@@ -23,6 +23,12 @@ Records for one Facet. The `applies_to` list is on a single line, so a substring
 grep -rlE '^applies_to: .*service:order-service' _memory
 ```
 
+Records with no `applies_to` key, which are org-wide. The grep misses org-wide Records written as `applies_to: null` or `applies_to: []`, and it keeps retired ones:
+
+```sh
+grep -rc '^applies_to:' _memory | grep ':0$'
+```
+
 Accepted PolicyRules, which are the standards an agent has to follow:
 
 ```sh
