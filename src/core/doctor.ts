@@ -2,7 +2,7 @@ import memoryBankSchema from "../../schema/memory-bank.schema.json" with { type:
 import { isMapping, type BankConfig } from "./bank.ts";
 import { isCalendarDate } from "./clock.ts";
 import { RETIRED_STATUSES } from "./query.ts";
-import type { RecallBackend } from "./recall.ts";
+import { tokenize, type RecallBackend } from "./recall.ts";
 import type { ParsedRecord } from "./record.ts";
 import { byCodeUnit } from "./text.ts";
 import { sharesScope } from "./validate.ts";
@@ -305,6 +305,15 @@ function supersessionNoSharedFacet(ctx: DoctorContext): DoctorFinding[] {
   return out;
 }
 
+// Fewest decimals (2 to 6) whose rounded text still reads above the threshold, and below 1 unless the score reached it, so the message never contradicts the check.
+function scoreText(score: number, t: number): string {
+  for (let d = 2; d <= 6; d++) {
+    const s = score.toFixed(d);
+    if (Number(s) > t && (Number(s) < 1 || score >= 1)) return s;
+  }
+  return String(score);
+}
+
 function nearDuplicate(ctx: DoctorContext): DoctorFinding[] {
   const backend = ctx.backend;
   if (!backend) return [];
@@ -314,7 +323,9 @@ function nearDuplicate(ctx: DoctorContext): DoctorFinding[] {
   for (const r of accepted) {
     if (typeof r.frontmatter.memory_type !== "string") continue;
     const { summary, title } = r.frontmatter;
-    const text = typeof summary === "string" && summary !== "" ? summary : title;
+    // qmd search ANDs every query word, and a whole summary rarely fits inside another Record, so the title goes first.
+    // A title with no tokens ("???", spaces) would query nothing, so it falls through to the summary.
+    const text = typeof title === "string" && tokenize(title).length > 0 ? title : summary;
     // A Record with neither is `ltm validate`'s to report; it can still be a hit for another query.
     if (typeof text !== "string" || text === "") continue;
     const mine = stringListField(r, "applies_to");
@@ -335,7 +346,7 @@ function nearDuplicate(ctx: DoctorContext): DoctorFinding[] {
     }
   }
   return [...pairs.values()].map(({ first, other, score }) =>
-    finding(first, "near-duplicate", `scores ${score.toFixed(2)} against ${other} (threshold ${t})`, [other]),
+    finding(first, "near-duplicate", `scores ${scoreText(score, t)} against ${other} (threshold ${t})`, [other]),
   );
 }
 

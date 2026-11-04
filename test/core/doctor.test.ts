@@ -558,20 +558,21 @@ const PUB_FIELDS: Record<string, string> = {
   schema: "1",
   id: "aB3cD4eF5g",
   memory_type: "Decision",
-  title: "Publish order events to the message queue",
+  title: "Adopt a message queue for order lifecycle events",
   status: "accepted",
   date: "2026-04-22",
   summary: "Order-service publishes order lifecycle events to the shared message queue instead of calling downstream services.",
   applies_to: "[service:order-service, domain:commerce]",
 };
 
-// Scores each candidate by the Jaccard index of its token set against the query's.
+// Scores each candidate by the Jaccard index of its title's token set (summary when the title is empty) against the query's.
+// MQ's title shares all 7 of its tokens with PUB's 8, so the pair scores 7/8 = 0.875.
 const jaccard: RecallBackend = {
   search(records, text) {
     const q = new Set(tokenize(text));
     return records.map((record) => {
       const { summary, title } = record.frontmatter;
-      const c = new Set(tokenize(typeof summary === "string" && summary !== "" ? summary : String(title)));
+      const c = new Set(tokenize(typeof title === "string" && title !== "" ? title : String(summary)));
       const shared = [...q].filter((t) => c.has(t)).length;
       return { record, score: shared / (q.size + c.size - shared) };
     });
@@ -592,14 +593,14 @@ describe("near-duplicate", () => {
         {
           file: MQ,
           check: "near-duplicate",
-          message: `scores 0.94 against ${PUB} (threshold 0.85)`,
+          message: `scores 0.88 against ${PUB} (threshold 0.85)`,
           related_files: [PUB],
         },
       ]);
     });
   });
 
-  test("a dissimilar summary reports nothing", async () => {
+  test("a dissimilar title and summary report nothing", async () => {
     await scratch(async (dir) => {
       await writeRecord(dir, PUB, { ...PUB_FIELDS, summary: "Order-service writes audit rows.", title: "Audit rows" });
       expect(withBackend(dir)).toEqual([]);
@@ -640,10 +641,10 @@ describe("near-duplicate", () => {
   test("the threshold is strict and echoed in the message", async () => {
     await scratch(async (dir) => {
       await writeRecord(dir, PUB, PUB_FIELDS);
-      expect(withBackend(dir, 0.95)).toEqual([]);
-      expect(withBackend(dir, 0.9).map((f) => f.message)).toEqual([`scores 0.94 against ${PUB} (threshold 0.9)`]);
-      // The score is exactly 15/16, so equal is not above.
-      expect(withBackend(dir, 0.9375)).toEqual([]);
+      expect(withBackend(dir, 0.9)).toEqual([]);
+      expect(withBackend(dir, 0.86).map((f) => f.message)).toEqual([`scores 0.88 against ${PUB} (threshold 0.86)`]);
+      // The score is exactly 7/8, so equal is not above.
+      expect(withBackend(dir, 0.875)).toEqual([]);
     });
   });
 
@@ -661,6 +662,88 @@ describe("near-duplicate", () => {
       await writeRecord(dir, PUB, untyped);
       await writeRecord(dir, "_memory/decisions/untyped-copy-qQ1wW2eE3r.md", { ...untyped, id: "qQ1wW2eE3r" });
       expect(withBackend(dir)).toEqual([]);
+    });
+  });
+
+  const MQ_TITLE = "Adopt a message queue for order events";
+  // The demo Bank holds other Decisions; only the MQ/PUB pair should score.
+  const pairOnly = (record: { path: string }, text: string, score: number) =>
+    (record.path === MQ || record.path === PUB) && (text === MQ_TITLE || text === PUB_FIELDS.title) ? score : 0;
+  const run = (dir: string, backend: RecallBackend) =>
+    nearDup(
+      runDoctor(listRecords(loadConfig(dir), () => {}), TODAY, DEFAULTS, backend),
+    );
+
+  test("a backend that scores a pair differently each way reports the higher score", async () => {
+    await scratch(async (dir) => {
+      await writeRecord(dir, PUB, PUB_FIELDS);
+      const asymmetric: RecallBackend = {
+        search: (records, text) => records.map((record) => ({ record, score: pairOnly(record, text, text === MQ_TITLE ? 0.9 : 0.95) })),
+      };
+      expect(run(dir, asymmetric).map((f) => f.message)).toEqual([`scores 0.95 against ${PUB} (threshold 0.85)`]);
+    });
+  });
+
+  test("a hit outside the candidate set never pairs", async () => {
+    await scratch(async (dir) => {
+      await writeRecord(dir, PUB, PUB_FIELDS);
+      await writeRecord(dir, "_memory/policy-rules/stray-zZ9yY8xX7w.md", {
+        ...PUB_FIELDS,
+        id: "zZ9yY8xX7w",
+        memory_type: "PolicyRule",
+        title: "Stray rule",
+        summary: "Unrelated.",
+        applies_to: "[service:order-service, domain:commerce]",
+      });
+      const all = listRecords(loadConfig(dir), () => {});
+      const stray = all.find((r) => r.path.includes("stray-zZ9yY8xX7w"))!;
+      const leaky: RecallBackend = {
+        search: (records) => [...records.map((record) => ({ record, score: 0 })), { record: stray, score: 0.99 }],
+      };
+      const found = run(dir, leaky);
+      expect(found).toEqual([]);
+      expect(JSON.stringify(found)).not.toContain("stray-zZ9yY8xX7w");
+    });
+  });
+
+  // Hits only when the query is PUB's summary, so a finding proves the summary was what got sent.
+  const summaryOnly: RecallBackend = {
+    search: (records, text) =>
+      text === PUB_FIELDS.summary ? records.filter((r) => r.path === MQ).map((record) => ({ record, score: 0.95 })) : [],
+  };
+  test.each([
+    ["an empty title", { title: '""' }],
+    ["a missing title", { title: null }],
+    ["a whitespace-only title", { title: '"   "' }],
+    ["a punctuation-only title", { title: '"???"' }],
+  ])("%s queries on the summary", async (_, change) => {
+    await scratch(async (dir) => {
+      const { title: _t, ...noTitle } = PUB_FIELDS;
+      await writeRecord(dir, PUB, change.title === null ? noTitle : { ...noTitle, ...change });
+      expect(run(dir, summaryOnly).map((f) => f.message)).toEqual([`scores 0.95 against ${PUB} (threshold 0.85)`]);
+    });
+  });
+
+  test("a Record with neither a usable title nor a summary pairs with nothing and doesn't throw", async () => {
+    await scratch(async (dir) => {
+      const { summary: _s, ...bare } = PUB_FIELDS;
+      await writeRecord(dir, PUB, { ...bare, title: '"???"' });
+      const queries: string[] = [];
+      const spy: RecallBackend = { search: (_r, text) => (queries.push(text), []) };
+      expect(run(dir, spy)).toEqual([]);
+      expect(queries).not.toContain("???");
+      expect(queries).not.toContain(undefined as unknown as string);
+    });
+  });
+
+  test.each([
+    [0.854, "0.854"],
+    [0.9999, "0.9999"],
+  ])("a score of %p prints as %s, above the threshold it sits beside", async (score, shown) => {
+    await scratch(async (dir) => {
+      await writeRecord(dir, PUB, PUB_FIELDS);
+      const fixed: RecallBackend = { search: (records, text) => records.map((record) => ({ record, score: pairOnly(record, text, score) })) };
+      expect(run(dir, fixed).map((f) => f.message)).toEqual([`scores ${shown} against ${PUB} (threshold 0.85)`]);
     });
   });
 });
