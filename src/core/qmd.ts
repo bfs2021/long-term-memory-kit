@@ -2,13 +2,15 @@ import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { isMapping, MEMORY_TYPES, type BankConfig, type MemoryType } from "./bank.ts";
+import type { ParsedRecord } from "./record.ts";
 import { tokenize, type Hit, type RecallBackend } from "./recall.ts";
 import { byCodeUnit, firstLine } from "./text.ts";
 
 // `qmd vsearch` expands the query with a generative LLM and `qmd query` reranks with one, which ADR 0001 rules out (see ADR 0003).
+// `vector` runs the library's searchVector, which only embeds (see ADR 0004).
 export type Recall = {
   backend: "qmd";
-  mode: "search";
+  mode: "search" | "vector";
   collections: Partial<Record<MemoryType, string>>;
 };
 
@@ -30,7 +32,7 @@ export function loadRecall(config: BankConfig): Recall | null | { error: string 
   }
   if (raw.backend !== "qmd") return { error: "recall.backend must be qmd" };
   const mode = raw.mode;
-  if (mode !== "search") return { error: `recall.mode must be search, not ${JSON.stringify(mode)}` };
+  if (mode !== "search" && mode !== "vector") return { error: `recall.mode must be search or vector, not ${JSON.stringify(mode)}` };
   const collections = raw.collections;
   if (!isMapping(collections) || Object.keys(collections).length === 0) {
     return { error: "recall.collections must map a memory_type to a qmd collection" };
@@ -41,22 +43,22 @@ export function loadRecall(config: BankConfig): Recall | null | { error: string 
   for (const [key, name] of Object.entries(collections)) {
     if (typeof name !== "string" || name === "") return { error: `recall.collections.${key} must be a collection name` };
   }
+  // Vector scores don't sit on search's scale, so the schema default would be meaningless (ADR 0004).
+  const doctor = config.raw.doctor;
+  if (mode === "vector" && !(isMapping(doctor) && doctor.near_duplicate_threshold !== undefined)) {
+    return { error: "doctor.near_duplicate_threshold is required when recall.mode is vector" };
+  }
   return { backend: "qmd", mode, collections: { ...(collections as Partial<Record<MemoryType, string>>) } };
 }
 
-export function qmdBackend(
-  recall: Recall,
-  root: string,
-  env: Record<string, string | undefined>,
-  warn: (line: string) => void,
-): RecallBackend & { preflight(): string | null } {
-  const { mode, collections } = recall;
+// `prefetch` lets the vector backend batch every lookup into one model load before runDoctor calls `search`.
+export type QmdBackend = RecallBackend & { preflight(): string | null; prefetch?(records: ParsedRecord[]): void };
+
+export function qmdCollections(collections: Partial<Record<MemoryType, string>>, env: Record<string, string | undefined>) {
   // The caller's env, not process.env: it decides which qmd runs and which index (XDG dirs) it reads.
   // `--all` can print more than Bun's ~1 MiB default maxBuffer, which would fail the run with ENOBUFS.
   const qmd = (args: string[]) => spawnSync("qmd", args, { encoding: "utf8", env, maxBuffer: Infinity });
-  const warned = new Set<string>();
   // realpath on both sides, since qmd stores a resolved path (macOS /tmp is /private/tmp).
-  let bankRoot: string | undefined;
   const collectionRoots = new Map<string, string>();
   const show = (type: MemoryType): string | null => {
     const name = collections[type]!;
@@ -72,18 +74,52 @@ export function qmdBackend(
     }
     return null;
   };
+  // Checks every collection up front, so a typo fails even when no type has two Records to compare.
+  const checkAll = (): string | null => {
+    for (const type of (Object.keys(collections) as MemoryType[]).sort(byCodeUnit)) {
+      const problem = show(type);
+      if (problem) return problem;
+    }
+    return null;
+  };
+  const collectionOf = (record: ParsedRecord): string | undefined => {
+    const type = record.frontmatter.memory_type;
+    return typeof type === "string" && Object.hasOwn(collections, type) ? collections[type as MemoryType] : undefined;
+  };
+  return { qmd, collectionRoots, show, checkAll, collectionOf };
+}
+
+export function hitRecord(
+  file: string,
+  collection: string,
+  collectionRoot: string,
+  bankRoot: string,
+  records: ParsedRecord[],
+): ParsedRecord | undefined {
+  // qmd 2.8.3 appends `?index=<name>` only for a non-default index; any other `?` belongs to the filename.
+  const uri = file.replace(/\?index=[\w.!~*'()%-]*$/, "");
+  const prefix = `qmd://${collection}/`;
+  if (!uri.startsWith(prefix)) return undefined;
+  // A suffix match would hand the queried Record's self-hit to a namesake in a subfolder, so paths must match exactly.
+  const abs = join(collectionRoot, uri.slice(prefix.length));
+  return records.find((c) => join(bankRoot, c.path) === abs);
+}
+
+export function qmdBackend(
+  recall: Recall,
+  root: string,
+  env: Record<string, string | undefined>,
+  warn: (line: string) => void,
+): QmdBackend {
+  const { mode, collections } = recall;
+  const warned = new Set<string>();
+  const { qmd, collectionRoots, show, checkAll, collectionOf } = qmdCollections(collections, env);
+  let bankRoot: string | undefined;
   return {
-    // Checks every collection up front, so a typo fails even when no type has two Records to compare.
-    preflight() {
-      for (const type of (Object.keys(collections) as MemoryType[]).sort(byCodeUnit)) {
-        const problem = show(type);
-        if (problem) return problem;
-      }
-      return null;
-    },
+    preflight: checkAll,
     search(records, text) {
       const type = records[0]?.frontmatter.memory_type;
-      const collection = typeof type === "string" && Object.hasOwn(collections, type) ? collections[type as MemoryType] : undefined;
+      const collection = records[0] && collectionOf(records[0]);
       // tokenize drops qmd's query syntax: a leading `-` negates a term, and an unbalanced `"` returns nothing.
       const tokens = tokenize(text);
       if (collection === undefined || tokens.length === 0) return [];
@@ -111,7 +147,6 @@ export function qmdBackend(
         parsed = undefined;
       }
       if (!Array.isArray(parsed)) throw new RecallError(`qmd ${mode} returned an unreadable result`);
-      const prefix = `qmd://${collection}/`;
       const hits: Hit[] = [];
       for (const el of parsed) {
         if (!isMapping(el) || typeof el.file !== "string") throw new RecallError(`qmd ${mode} returned an unreadable result`);
@@ -119,13 +154,7 @@ export function qmdBackend(
         if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) {
           throw new RecallError(`qmd ${mode} returned score ${JSON.stringify(score)} for ${file}`);
         }
-        // qmd 2.8.3 appends `?index=<name>` only for a non-default index; any other `?` belongs to the filename.
-        const uri = file.replace(/\?index=[\w.!~*'()%-]*$/, "");
-        if (!uri.startsWith(prefix)) continue;
-        const rel = uri.slice(prefix.length);
-        // A suffix match would hand the queried Record's self-hit to a namesake in a subfolder, so paths must match exactly.
-        const abs = join(collectionRoot, rel);
-        const match = records.find((c) => join(bankRoot!, c.path) === abs);
+        const match = hitRecord(file, collection, collectionRoot, bankRoot, records);
         if (match) hits.push({ record: match, score });
       }
       return hits;

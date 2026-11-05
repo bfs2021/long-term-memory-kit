@@ -1,6 +1,7 @@
 import { runDoctor, loadThresholds } from "../core/doctor.ts";
 import { today } from "../core/clock.ts";
-import { loadRecall, qmdBackend, RecallError } from "../core/qmd.ts";
+import { loadRecall, qmdBackend, RecallError, type QmdBackend } from "../core/qmd.ts";
+import { qmdVectorBackend } from "../core/qmd-vector.ts";
 import { listRecords } from "../core/query.ts";
 import { firstLine } from "../core/text.ts";
 import { ConfigError } from "../core/bank.ts";
@@ -49,7 +50,9 @@ export const doctor: Command = {
       ctx.err(`ltm doctor: memory-bank.yaml: ${recall.error}\n`);
       return 1;
     }
-    const backend = recall === null ? undefined : qmdBackend(recall, config.root, ctx.env, (line) => ctx.err(`ltm doctor: qmd: ${line}\n`));
+    const warn = (line: string) => ctx.err(`ltm doctor: qmd: ${line}\n`);
+    const backend: QmdBackend | undefined =
+      recall === null ? undefined : recall.mode === "vector" ? qmdVectorBackend(recall, config.root, ctx.env, warn) : qmdBackend(recall, config.root, ctx.env, warn);
     const problem = backend?.preflight();
     if (problem) {
       ctx.err(`ltm doctor: ${problem}\n`);
@@ -60,6 +63,7 @@ export const doctor: Command = {
     });
     let findings;
     try {
+      backend?.prefetch?.(records);
       findings = runDoctor(records, date, thresholds, backend);
     } catch (e) {
       if (!(e instanceof RecallError)) throw e;
