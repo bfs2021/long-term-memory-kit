@@ -17,6 +17,10 @@ export const discover: Command = {
     },
   },
   positionals: [{ name: "path", required: true, variadic: true }],
+  // With several paths the remote ref would depend on which argument reached a file first.
+  checkArgs(positionals, values) {
+    if (values["source-ref-prefix"] !== undefined && positionals.length > 1) return "--source-ref-prefix takes exactly one path";
+  },
   async run(ctx) {
     let bank: BankConfig | null = null;
     const flag = ctx.values.bank;

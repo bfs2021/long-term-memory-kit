@@ -118,12 +118,12 @@ export function titleOf(relPath: string, kind: Kind, text: string): string {
   return basename(relPath);
 }
 
-// `prefixed` is an extra exact-match candidate: a synced library's path in its remote `sharepoint:` form.
+// A synced library's Records cite the remote form (`sharepoint:site/lib/path`), which no local path can match.
 export function citedBy(
   entryPath: string,
   repoRelPath: string | null,
   records: ParsedRecord[],
-  prefixed?: string,
+  remoteRef?: string,
 ): string[] {
   const ids: string[] = [];
   for (const r of records) {
@@ -134,7 +134,7 @@ export function citedBy(
       (ref) =>
         typeof ref === "string" &&
         (ref === entryPath ||
-          ref === prefixed ||
+          ref === remoteRef ||
           (repoRelPath !== null &&
             (ref === repoRelPath || (URL_SCHEME.test(ref) && ref.endsWith(`/${repoRelPath}`))))),
     );
@@ -183,7 +183,7 @@ export function discover(
   const { cwd, bank, onError, onSkip, sourceRefPrefix } = opts;
   const aliases = aliasesOf(bank);
   const toRel = (abs: string) => relative(cwd, abs).split(sep).join("/");
-  // `base` is the argument's directory (a file argument's parent): the prefix joins to the path under it.
+  // The remote ref is relative to the synced folder, which is lost once the walk flattens to paths.
   const files: { abs: string; base: string }[] = [];
 
   const walk = (dir: string, base: string): void => {
@@ -235,26 +235,18 @@ export function discover(
     const rel = toRel(abs);
     if (seen.has(rel)) continue;
     seen.add(rel);
+    const isBinaryDoc = BINARY_DOC.has(extname(abs).toLowerCase());
     let bytes: number;
+    let text = "";
     try {
       bytes = lstatSync(abs).size;
+      if (!isBinaryDoc) {
+        if (bytes > MAX_BYTES) throw new Error("over 1 MiB");
+        text = readFileSync(abs, "utf8");
+      }
     } catch (e) {
       onSkip(rel, firstLine((e as Error).message ?? "") || "unreadable");
       continue;
-    }
-    const isBinaryDoc = BINARY_DOC.has(extname(abs).toLowerCase());
-    if (!isBinaryDoc && bytes > MAX_BYTES) {
-      onSkip(rel, "over 1 MiB");
-      continue;
-    }
-    let text = "";
-    if (!isBinaryDoc) {
-      try {
-        text = readFileSync(abs, "utf8");
-      } catch (e) {
-        onSkip(rel, firstLine((e as Error).message ?? "") || "unreadable");
-        continue;
-      }
     }
     const root = repoRootOf(dirname(abs), repoRoots);
     const repoRel = root === null ? null : relative(root, abs).split(sep).join("/");
@@ -263,9 +255,9 @@ export function discover(
     // turn every file into an ADR. Without a repo, the cwd-relative path is all there is.
     const kind: Kind | null = isBinaryDoc ? "binary-doc" : classify(repoRel ?? rel, text, aliases);
     if (kind === null) continue;
-    const prefixed =
+    const remoteRef =
       sourceRefPrefix === undefined ? undefined : sourceRefPrefix + relative(base, abs).split(sep).join("/");
-    const cited = records ? citedBy(rel, repoRel, records, prefixed) : null;
+    const cited = records ? citedBy(rel, repoRel, records, remoteRef) : null;
     const title = isBinaryDoc ? basename(rel, extname(rel)) : titleOf(rel, kind, text);
     entries.push({ path: rel, kind, title, bytes, cited_by: cited });
   }

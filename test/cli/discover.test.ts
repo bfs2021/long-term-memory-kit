@@ -19,6 +19,12 @@ const POSTGRES = "fixtures/hydration-sources/adr/0001-postgres.md";
 const RECORD = "_memory/decisions/postgres-everywhere-kQ7vN2xLp4.md";
 
 describe("ltm discover", () => {
+  test("--source-ref-prefix with two paths exits 2", async () => {
+    const r = await ltm(repo, "discover", "fixtures/hydration-sources", "fixtures/demo-bank", "--source-ref-prefix", "sharepoint:a/b/");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("--source-ref-prefix takes exactly one path");
+    expect(r.stdout).toBe("");
+  });
   test("1: the corpus lists ten entries with the expected kinds", async () => {
     const r = await ltm(repo, "discover", "fixtures/hydration-sources", "--json", "--bank", "fixtures/demo-bank");
     expect(r.exitCode).toBe(0);

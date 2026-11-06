@@ -28,7 +28,7 @@ List the Hydration sources under the paths the person gave you:
 ltm discover docs/adr notes/ --bank <bank>
 ```
 
-Each line shows a source's kind (`adr`, `pr`, `transcript`, `prd`, `document`, or `binary-doc`), its path, its title, and any Records that already cite it. Drop every source that shows a citation. A `binary-doc` is a Word, PowerPoint, Excel, or PDF file, and you convert it before you read it; the SharePoint section covers how.
+Each line shows a source's kind (`adr`, `pr`, `transcript`, `prd`, `document`, or `binary-doc`), its path, its title, and any Records that already cite it. Drop every source that shows a citation. A `binary-doc` is a Word, PowerPoint, Excel, or PDF file, which you convert before you read it. The SharePoint section below covers how.
 
 Without `ltm`, glob for the files yourself, such as `docs/adr/*.md`. Then, from the Bank root, grep for Records that already cite each one:
 
@@ -64,13 +64,13 @@ Before you convert anything, see which converters are installed:
 command -v markitdown pandoc pdftotext
 ```
 
-`markitdown` reads all four formats. `pandoc` reads `.docx` and `.pptx`, and `pdftotext` reads `.pdf`. Compare that against the extensions Discover listed. If a listed format has no converter, tell the person once, before you draft anything. Name `markitdown` as the one install that covers all four formats, and ask whether to install it or skip those files. Never install a converter without the person's yes.
+`markitdown` reads all four formats when it's installed with its extras, as `markitdown[all]`. `pandoc` reads `.docx` and `pdftotext` reads `.pdf`, so only `markitdown` reads `.pptx` and `.xlsx`. Compare that against the extensions Discover listed. If a listed format has no converter, tell the person once, before you draft anything. Name `markitdown[all]` as the one install that covers all four formats (`pipx install 'markitdown[all]'`), and ask whether to install it or skip those files. Never install a converter without the person's yes.
 
 ### Convert
 
 Convert each `binary-doc` whose `cited_by` is empty into Markdown in your working directory, such as `markitdown data-retention.docx > data-retention.md`. Read the converted text in Extract, as you would any other source.
 
-Skip a file that no installed converter reads, and list it in the run summary with the install that would have covered it. Never draft from a file name, because a name like `data-retention.docx` doesn't say what the policy requires.
+Skip a file when no installed converter reads it or its converter exits with an error. List each skipped file in the run summary with the install that would have covered it. A bare `markitdown` install, without the extras, exits with an error on `.docx` and `.pdf`. Never draft from a file name, because a name like `data-retention.docx` doesn't say what the policy requires.
 
 A converted file that opens with a `# … Digest` heading, followed by a line starting `Bank commit`, is a Digest from this Bank or another one. Skip it and list it in the run summary as "a Digest; read its Bank instead." A Digest copies a Bank's accepted Records, so a Proposal drafted from one would cite a copy. `ltm publish sharepoint` also puts Digests into libraries people sync.
 
