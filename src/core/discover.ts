@@ -7,13 +7,15 @@ import { listRecords } from "./query.ts";
 import { splitFrontmatter, type ParsedRecord } from "./record.ts";
 import { byCodeUnit, firstLine } from "./text.ts";
 
-export type Kind = "adr" | "pr" | "transcript" | "prd" | "document";
+export type Kind = "adr" | "pr" | "transcript" | "prd" | "document" | "binary-doc";
 export type Entry = { path: string; kind: Kind; title: string; bytes: number; cited_by: string[] | null };
 export type Aliases = { Context: string[]; Decision: string[] };
 type Heading = { level: number; text: string };
 type SourceFile = { rel: string; ext: string; text: string; headings: Heading[] };
 
 const MAX_BYTES = 1_048_576;
+// Listed by extension and never opened: a SharePoint sync folder's online-only files would download on read, and conversion is the agent's job.
+const BINARY_DOC = new Set([".docx", ".pptx", ".xlsx", ".pdf"]);
 const HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 const SPEAKER = /^[A-Z][\w .'-]{0,40}: /;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//;
@@ -225,27 +227,35 @@ export function discover(
     if (seen.has(rel)) continue;
     seen.add(rel);
     let bytes: number;
-    let text: string;
     try {
       bytes = lstatSync(abs).size;
-      if (bytes > MAX_BYTES) {
-        onSkip(rel, "over 1 MiB");
-        continue;
-      }
-      text = readFileSync(abs, "utf8");
     } catch (e) {
       onSkip(rel, firstLine((e as Error).message ?? "") || "unreadable");
       continue;
+    }
+    const isBinaryDoc = BINARY_DOC.has(extname(abs).toLowerCase());
+    if (!isBinaryDoc && bytes > MAX_BYTES) {
+      onSkip(rel, "over 1 MiB");
+      continue;
+    }
+    let text = "";
+    if (!isBinaryDoc) {
+      try {
+        text = readFileSync(abs, "utf8");
+      } catch (e) {
+        onSkip(rel, firstLine((e as Error).message ?? "") || "unreadable");
+        continue;
+      }
     }
     const root = repoRootOf(dirname(abs), repoRoots);
     const repoRel = root === null ? null : relative(root, abs).split(sep).join("/");
     // The folder rule must see the same directories whether `ltm discover` runs from the repo root or
     // from inside `adr/`. Absolute segments are off the table: a checkout under `~/decisions/` would
     // turn every file into an ADR. Without a repo, the cwd-relative path is all there is.
-    const kind = classify(repoRel ?? rel, text, aliases);
+    const kind: Kind | null = isBinaryDoc ? "binary-doc" : classify(repoRel ?? rel, text, aliases);
     if (kind === null) continue;
     const cited = records ? citedBy(rel, repoRel, records) : null;
-    entries.push({ path: rel, kind, title: titleOf(rel, kind, text), bytes, cited_by: cited });
+    entries.push({ path: rel, kind, title: isBinaryDoc ? basename(rel, extname(rel)) : titleOf(rel, kind, text), bytes, cited_by: cited });
   }
   entries.sort((a, b) => byCodeUnit(a.path, b.path));
   return entries;
