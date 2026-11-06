@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { isMapping, MEMORY_TYPES, type BankConfig, type MemoryType } from "./bank.ts";
+import type { Query } from "./qmd-vector-worker.ts";
 import type { ParsedRecord } from "./record.ts";
 import { tokenize, type Hit, type RecallBackend } from "./recall.ts";
 import { byCodeUnit, firstLine } from "./text.ts";
@@ -52,7 +53,14 @@ export function loadRecall(config: BankConfig): Recall | null | { error: string 
 }
 
 // `prefetch` lets the vector backend batch every lookup into one model load before runDoctor calls `search`.
-export type QmdBackend = RecallBackend & { preflight(): string | null; prefetch?(records: ParsedRecord[]): void };
+export type QmdBackend = RecallBackend & {
+  preflight(): string | null;
+  prefetch?(records: ParsedRecord[]): void;
+  prefetchQueries?(queries: Query[]): void;
+  collectionOf(record: ParsedRecord): string | undefined;
+  // Absolute, realpath'd paths of every active file qmd has indexed in this collection.
+  indexed(collection: string): Set<string>;
+};
 
 export function qmdCollections(collections: Partial<Record<MemoryType, string>>, env: Record<string, string | undefined>) {
   // The caller's env, not process.env: it decides which qmd runs and which index (XDG dirs) it reads.
@@ -83,10 +91,33 @@ export function qmdCollections(collections: Partial<Record<MemoryType, string>>,
     return null;
   };
   const collectionOf = (record: ParsedRecord): string | undefined => {
-    const type = record.frontmatter.memory_type;
-    return typeof type === "string" && Object.hasOwn(collections, type) ? collections[type as MemoryType] : undefined;
+    // The folder decides memory_type (see matches() in query.ts); a drifted header must not pick the collection.
+    const type = record.memoryType;
+    return Object.hasOwn(collections, type) ? collections[type] : undefined;
   };
-  return { qmd, collectionRoots, show, checkAll, collectionOf };
+  const indexed = (name: string): Set<string> => {
+    if (!collectionRoots.has(name)) {
+      const type = (Object.keys(collections) as MemoryType[]).find((t) => collections[t] === name);
+      const problem = type === undefined ? null : show(type);
+      if (problem) throw new RecallError(problem);
+    }
+    const collectionRoot = collectionRoots.get(name);
+    // NO_COLOR keeps qmd from wrapping the path in escape codes when stdout is a TTY.
+    const r = spawnSync("qmd", ["ls", name], { encoding: "utf8", env: { ...env, NO_COLOR: "1" }, maxBuffer: Infinity });
+    if (r.error) throw new RecallError(`qmd ls ${name} failed: ${firstLine(r.error.message)}`);
+    if (r.status !== 0) {
+      const first = (r.stderr ?? "").split("\n").find((l) => l.trim() !== "")?.trim();
+      throw new RecallError(`qmd ls ${name} failed: ${first ?? `exit ${r.status}`}`);
+    }
+    const prefix = `qmd://${name}/`;
+    const files = new Set<string>();
+    for (const line of (r.stdout ?? "").split("\n")) {
+      const at = line.indexOf(` ${prefix}`);
+      if (at >= 0 && collectionRoot !== undefined) files.add(join(collectionRoot, line.slice(at + 1 + prefix.length).trimEnd()));
+    }
+    return files;
+  };
+  return { qmd, collectionRoots, show, checkAll, collectionOf, indexed };
 }
 
 export function hitRecord(
@@ -113,12 +144,14 @@ export function qmdBackend(
 ): QmdBackend {
   const { mode, collections } = recall;
   const warned = new Set<string>();
-  const { qmd, collectionRoots, show, checkAll, collectionOf } = qmdCollections(collections, env);
+  const { qmd, collectionRoots, show, checkAll, collectionOf, indexed } = qmdCollections(collections, env);
   let bankRoot: string | undefined;
   return {
     preflight: checkAll,
+    collectionOf,
+    indexed,
     search(records, text) {
-      const type = records[0]?.frontmatter.memory_type;
+      const type = records[0]?.memoryType;
       const collection = records[0] && collectionOf(records[0]);
       // tokenize drops qmd's query syntax: a leading `-` negates a term, and an unbalanced `"` returns nothing.
       const tokens = tokenize(text);
