@@ -1,6 +1,22 @@
 {
   "name": "long-term-memory-kit",
   "version": "0.0.0",
+  "description": "Org-level memory for coding agents: shared decisions and policies in a git repo, with a CLI and MCP server.",
+  "keywords": [
+    "coding-agents",
+    "ai-agents",
+    "claude-code",
+    "claude-code-plugin",
+    "mcp",
+    "model-context-protocol",
+    "architecture-decision-records",
+    "adr",
+    "knowledge-management",
+    "developer-tools",
+    "cli",
+    "bun"
+  ],
+  "author": "Kendrick Arnett",
   "private": true,
   "type": "module",
   "license": "MIT",
