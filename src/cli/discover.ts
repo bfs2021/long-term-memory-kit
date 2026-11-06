@@ -11,6 +11,10 @@ export const discover: Command = {
   options: {
     json: { type: "boolean", description: "Print the sources as JSON" },
     bank: { type: "string", description: "Path to the Bank to use" },
+    "source-ref-prefix": {
+      type: "string",
+      description: "Also count a file as cited when a Record's source_refs holds this prefix plus its path under the given directory",
+    },
   },
   positionals: [{ name: "path", required: true, variadic: true }],
   async run(ctx) {
@@ -44,6 +48,7 @@ export const discover: Command = {
     const entries = discoverEntries(ctx.positionals, {
       cwd: ctx.cwd,
       bank,
+      sourceRefPrefix: typeof ctx.values["source-ref-prefix"] === "string" ? ctx.values["source-ref-prefix"] : undefined,
       onError(msg) {
         failed = true;
         ctx.err(`ltm discover: ${msg}\n`);

@@ -118,7 +118,13 @@ export function titleOf(relPath: string, kind: Kind, text: string): string {
   return basename(relPath);
 }
 
-export function citedBy(entryPath: string, repoRelPath: string | null, records: ParsedRecord[]): string[] {
+// `prefixed` is an extra exact-match candidate: a synced library's path in its remote `sharepoint:` form.
+export function citedBy(
+  entryPath: string,
+  repoRelPath: string | null,
+  records: ParsedRecord[],
+  prefixed?: string,
+): string[] {
   const ids: string[] = [];
   for (const r of records) {
     const refs = r.frontmatter.source_refs;
@@ -128,6 +134,7 @@ export function citedBy(entryPath: string, repoRelPath: string | null, records: 
       (ref) =>
         typeof ref === "string" &&
         (ref === entryPath ||
+          ref === prefixed ||
           (repoRelPath !== null &&
             (ref === repoRelPath || (URL_SCHEME.test(ref) && ref.endsWith(`/${repoRelPath}`))))),
     );
@@ -170,14 +177,16 @@ export function discover(
     bank: BankConfig | null;
     onError(msg: string): void;
     onSkip(path: string, reason: string): void;
+    sourceRefPrefix?: string;
   },
 ): Entry[] {
-  const { cwd, bank, onError, onSkip } = opts;
+  const { cwd, bank, onError, onSkip, sourceRefPrefix } = opts;
   const aliases = aliasesOf(bank);
   const toRel = (abs: string) => relative(cwd, abs).split(sep).join("/");
-  const files: string[] = [];
+  // `base` is the argument's directory (a file argument's parent): the prefix joins to the path under it.
+  const files: { abs: string; base: string }[] = [];
 
-  const walk = (dir: string): void => {
+  const walk = (dir: string, base: string): void => {
     let dirents;
     try {
       dirents = readdirSync(dir, { withFileTypes: true });
@@ -199,8 +208,8 @@ export function discover(
         continue;
       }
       if (d.isDirectory()) {
-        if (d.name !== "node_modules") walk(p);
-      } else if (d.isFile()) files.push(p);
+        if (d.name !== "node_modules") walk(p, base);
+      } else if (d.isFile()) files.push({ abs: p, base });
     }
   };
 
@@ -214,15 +223,15 @@ export function discover(
       continue;
     }
     if (st.isSymbolicLink()) onSkip(toRel(abs), "symlink, not followed");
-    else if (st.isDirectory()) walk(abs);
-    else if (st.isFile()) files.push(abs);
+    else if (st.isDirectory()) walk(abs, abs);
+    else if (st.isFile()) files.push({ abs, base: dirname(abs) });
   }
 
   const records = bank ? listRecords(bank, onSkip) : null;
   const repoRoots = new Map<string, string | null>();
   const seen = new Set<string>();
   const entries: Entry[] = [];
-  for (const abs of files) {
+  for (const { abs, base } of files) {
     const rel = toRel(abs);
     if (seen.has(rel)) continue;
     seen.add(rel);
@@ -254,8 +263,11 @@ export function discover(
     // turn every file into an ADR. Without a repo, the cwd-relative path is all there is.
     const kind: Kind | null = isBinaryDoc ? "binary-doc" : classify(repoRel ?? rel, text, aliases);
     if (kind === null) continue;
-    const cited = records ? citedBy(rel, repoRel, records) : null;
-    entries.push({ path: rel, kind, title: isBinaryDoc ? basename(rel, extname(rel)) : titleOf(rel, kind, text), bytes, cited_by: cited });
+    const prefixed =
+      sourceRefPrefix === undefined ? undefined : sourceRefPrefix + relative(base, abs).split(sep).join("/");
+    const cited = records ? citedBy(rel, repoRel, records, prefixed) : null;
+    const title = isBinaryDoc ? basename(rel, extname(rel)) : titleOf(rel, kind, text);
+    entries.push({ path: rel, kind, title, bytes, cited_by: cited });
   }
   entries.sort((a, b) => byCodeUnit(a.path, b.path));
   return entries;

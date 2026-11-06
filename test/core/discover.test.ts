@@ -142,6 +142,14 @@ describe("citedBy", () => {
     expect(citedBy("x/a/b.md", "a/b.md", [r])).toEqual(["r1"]);
     expect(citedBy("x/a/b.md", null, [r])).toEqual([]);
   });
+  test("an extra candidate cites only on an exact match", () => {
+    const recs = [rec("aaaaaaaaaa", { source_refs: ["sharepoint:acme/Policies/data-retention.docx"] })];
+    const f = "lib/data-retention.docx";
+    expect(citedBy(f, null, recs, "sharepoint:acme/Policies/data-retention.docx")).toEqual(["aaaaaaaaaa"]);
+    expect(citedBy(f, null, recs, "sharepoint:acme/Policies/data-retention.docx/")).toEqual([]);
+    expect(citedBy(f, null, recs, "sharepoint:acme/Other/data-retention.docx")).toEqual([]);
+    expect(citedBy(f, null, recs)).toEqual([]);
+  });
   test("ids come back sorted", () => {
     const rs = [rec("b", { source_refs: ["a.md"] }), rec("a", { source_refs: ["a.md"] })];
     expect(citedBy("a.md", null, rs)).toEqual(["a", "b"]);
