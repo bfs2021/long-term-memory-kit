@@ -64,7 +64,7 @@ Before you convert anything, see which converters are installed:
 command -v markitdown pandoc pdftotext
 ```
 
-`markitdown` reads all four formats when it's installed with its extras, as `markitdown[all]`. `pandoc` reads `.docx` and `pdftotext` reads `.pdf`, so only `markitdown` reads `.pptx` and `.xlsx`. Compare that against the extensions Discover listed. If a listed format has no converter, tell the person once, before you draft anything. Name `markitdown[all]` as the one install that covers all four formats (`pipx install 'markitdown[all]'`), and ask whether to install it or skip those files. Never install a converter without the person's yes.
+`markitdown` reads all four formats when it's installed with its extras, as `markitdown[all]`. `pdftotext` reads `.pdf`, and `pandoc` reads `.docx`. Recent `pandoc` releases also read `.pptx` and `.xlsx`, and older ones don't. If `pandoc` is installed, check `pandoc --list-input-formats` for `pptx` and `xlsx` before you count on it for those formats. Compare what's installed against the extensions Discover listed. If a listed format has no converter, tell the person once, before you draft anything. Name `markitdown[all]` as the one install that covers all four formats (`pipx install 'markitdown[all]'`), and ask whether to install it or skip those files. Never install a converter without the person's yes.
 
 ### Convert
 
@@ -79,7 +79,7 @@ A converted file that opens with a `# … Digest` heading, followed by a line st
 Every Proposal drafted from the library cites `sharepoint:<site>/<library>/<relative path>`, the prefix joined to the file's path under the synced folder:
 
 ```text
-ltm propose --type PolicyRule --title "Keep customer records for seven years" --summary "…" --source-ref sharepoint:acme/Policies/data-retention.docx --body-file draft.md
+ltm propose --type PolicyRule --title "Keep order records for seven years" --summary "…" --source-ref sharepoint:acme/Policies/data-retention.docx --body-file draft.md
 ```
 
 ### Without a Synced Folder
