@@ -22,6 +22,10 @@ _Avoid_: Local memory, repo memory
 A prefixed scope value on a record, such as `service:order-service` or `domain:commerce`, saying where the record applies. The bank declares which prefixes exist, and any value is allowed after one.
 _Avoid_: Tag, label, scope
 
+**Digest**:
+A read-only rendering of a bank's accepted records, published for readers who can't or don't read the bank itself.
+_Avoid_: Mirror, export, snapshot
+
 ### Records
 
 **Record**:
