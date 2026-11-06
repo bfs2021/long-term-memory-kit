@@ -9,6 +9,7 @@ summary: Acme services write logs to stdout as one JSON object per line.
 applies_to: [domain:commerce, system:observability]
 owners: [team:platform-engineering]
 tags: [logging]
+source_refs: [sharepoint:acme/Policies/data-retention.docx]
 ---
 
 Log one JSON object per line to stdout with level, timestamp, and trace id fields. Free-text log lines fail the pipeline parser.

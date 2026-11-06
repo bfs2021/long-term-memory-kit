@@ -7,13 +7,15 @@ import { listRecords } from "./query.ts";
 import { splitFrontmatter, type ParsedRecord } from "./record.ts";
 import { byCodeUnit, firstLine } from "./text.ts";
 
-export type Kind = "adr" | "pr" | "transcript" | "prd" | "document";
+export type Kind = "adr" | "pr" | "transcript" | "prd" | "document" | "binary-doc";
 export type Entry = { path: string; kind: Kind; title: string; bytes: number; cited_by: string[] | null };
 export type Aliases = { Context: string[]; Decision: string[] };
 type Heading = { level: number; text: string };
 type SourceFile = { rel: string; ext: string; text: string; headings: Heading[] };
 
 const MAX_BYTES = 1_048_576;
+// Listed by extension and never opened: a SharePoint sync folder's online-only files would download on read, and conversion is the agent's job.
+const BINARY_DOC = new Set([".docx", ".pptx", ".xlsx", ".pdf"]);
 const HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 const SPEAKER = /^[A-Z][\w .'-]{0,40}: /;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//;
@@ -116,7 +118,13 @@ export function titleOf(relPath: string, kind: Kind, text: string): string {
   return basename(relPath);
 }
 
-export function citedBy(entryPath: string, repoRelPath: string | null, records: ParsedRecord[]): string[] {
+// A synced library's Records cite the remote form (`sharepoint:site/lib/path`), which no local path can match.
+export function citedBy(
+  entryPath: string,
+  repoRelPath: string | null,
+  records: ParsedRecord[],
+  remoteRef?: string,
+): string[] {
   const ids: string[] = [];
   for (const r of records) {
     const refs = r.frontmatter.source_refs;
@@ -126,6 +134,7 @@ export function citedBy(entryPath: string, repoRelPath: string | null, records: 
       (ref) =>
         typeof ref === "string" &&
         (ref === entryPath ||
+          ref === remoteRef ||
           (repoRelPath !== null &&
             (ref === repoRelPath || (URL_SCHEME.test(ref) && ref.endsWith(`/${repoRelPath}`))))),
     );
@@ -168,14 +177,16 @@ export function discover(
     bank: BankConfig | null;
     onError(msg: string): void;
     onSkip(path: string, reason: string): void;
+    sourceRefPrefix?: string;
   },
 ): Entry[] {
-  const { cwd, bank, onError, onSkip } = opts;
+  const { cwd, bank, onError, onSkip, sourceRefPrefix } = opts;
   const aliases = aliasesOf(bank);
   const toRel = (abs: string) => relative(cwd, abs).split(sep).join("/");
-  const files: string[] = [];
+  // The remote ref is relative to the synced folder, which is lost once the walk flattens to paths.
+  const files: { abs: string; base: string }[] = [];
 
-  const walk = (dir: string): void => {
+  const walk = (dir: string, base: string): void => {
     let dirents;
     try {
       dirents = readdirSync(dir, { withFileTypes: true });
@@ -197,8 +208,8 @@ export function discover(
         continue;
       }
       if (d.isDirectory()) {
-        if (d.name !== "node_modules") walk(p);
-      } else if (d.isFile()) files.push(p);
+        if (d.name !== "node_modules") walk(p, base);
+      } else if (d.isFile()) files.push({ abs: p, base });
     }
   };
 
@@ -212,27 +223,27 @@ export function discover(
       continue;
     }
     if (st.isSymbolicLink()) onSkip(toRel(abs), "symlink, not followed");
-    else if (st.isDirectory()) walk(abs);
-    else if (st.isFile()) files.push(abs);
+    else if (st.isDirectory()) walk(abs, abs);
+    else if (st.isFile()) files.push({ abs, base: dirname(abs) });
   }
 
   const records = bank ? listRecords(bank, onSkip) : null;
   const repoRoots = new Map<string, string | null>();
   const seen = new Set<string>();
   const entries: Entry[] = [];
-  for (const abs of files) {
+  for (const { abs, base } of files) {
     const rel = toRel(abs);
     if (seen.has(rel)) continue;
     seen.add(rel);
+    const isBinaryDoc = BINARY_DOC.has(extname(abs).toLowerCase());
     let bytes: number;
-    let text: string;
+    let text = "";
     try {
       bytes = lstatSync(abs).size;
-      if (bytes > MAX_BYTES) {
-        onSkip(rel, "over 1 MiB");
-        continue;
+      if (!isBinaryDoc) {
+        if (bytes > MAX_BYTES) throw new Error("over 1 MiB");
+        text = readFileSync(abs, "utf8");
       }
-      text = readFileSync(abs, "utf8");
     } catch (e) {
       onSkip(rel, firstLine((e as Error).message ?? "") || "unreadable");
       continue;
@@ -242,10 +253,13 @@ export function discover(
     // The folder rule must see the same directories whether `ltm discover` runs from the repo root or
     // from inside `adr/`. Absolute segments are off the table: a checkout under `~/decisions/` would
     // turn every file into an ADR. Without a repo, the cwd-relative path is all there is.
-    const kind = classify(repoRel ?? rel, text, aliases);
+    const kind: Kind | null = isBinaryDoc ? "binary-doc" : classify(repoRel ?? rel, text, aliases);
     if (kind === null) continue;
-    const cited = records ? citedBy(rel, repoRel, records) : null;
-    entries.push({ path: rel, kind, title: titleOf(rel, kind, text), bytes, cited_by: cited });
+    const remoteRef =
+      sourceRefPrefix === undefined ? undefined : sourceRefPrefix + relative(base, abs).split(sep).join("/");
+    const cited = records ? citedBy(rel, repoRel, records, remoteRef) : null;
+    const title = isBinaryDoc ? basename(rel, extname(rel)) : titleOf(rel, kind, text);
+    entries.push({ path: rel, kind, title, bytes, cited_by: cited });
   }
   entries.sort((a, b) => byCodeUnit(a.path, b.path));
   return entries;

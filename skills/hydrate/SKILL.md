@@ -28,7 +28,7 @@ List the Hydration sources under the paths the person gave you:
 ltm discover docs/adr notes/ --bank <bank>
 ```
 
-Each line shows a source's kind (`adr`, `pr`, `transcript`, `prd`, or `document`), its path, its title, and any Records that already cite it. Drop every source that shows a citation.
+Each line shows a source's kind (`adr`, `pr`, `transcript`, `prd`, `document`, or `binary-doc`), its path, its title, and any Records that already cite it. Drop every source that shows a citation. A `binary-doc` is a Word, PowerPoint, Excel, or PDF file, which you convert before you read it. The SharePoint section below covers how.
 
 Without `ltm`, glob for the files yourself, such as `docs/adr/*.md`. Then, from the Bank root, grep for Records that already cite each one:
 
@@ -37,6 +37,54 @@ grep -rl '^source_refs: .*0001-postgres.md' _memory
 ```
 
 A match means a Record cites that source, so skip it.
+
+## SharePoint
+
+Use this section when the sources are Word, PowerPoint, Excel, or PDF files in a SharePoint document library.
+
+### Sync the Library
+
+Work from a synced folder whenever the person has one, because only a local folder lets `ltm discover` fill `cited_by`. Ask the person to sync the library with the OneDrive client, through the library's "Sync" or "Add shortcut to My files" button.
+
+Read `<site>` and `<library>` off the library's address in the browser. They are the two path segments after `/sites/`, URL-decoded, with case kept. `https://acme.sharepoint.com/sites/acme/Policies/Forms/AllItems.aspx` gives `sharepoint:acme/Policies/`. Leave the tenant out. Don't use the library's display name, which someone can rename; the default library shows "Documents" while its address says `Shared%20Documents`.
+
+Run Discover on the synced folder with that prefix:
+
+```text
+ltm discover ~/Acme/Policies --source-ref-prefix sharepoint:acme/Policies/ --bank <bank>
+```
+
+`--source-ref-prefix` joins the prefix to each file's path under the folder. A Record that cites `sharepoint:acme/Policies/data-retention.docx` then shows up in that file's `cited_by`.
+
+### Check for Converters
+
+Before you convert anything, see which converters are installed:
+
+```sh
+command -v markitdown pandoc pdftotext
+```
+
+`markitdown` reads all four formats when it's installed with its extras, as `markitdown[all]`. `pdftotext` reads `.pdf`, and `pandoc` reads `.docx`. Recent `pandoc` releases also read `.pptx` and `.xlsx`, and older ones don't. If `pandoc` is installed, check `pandoc --list-input-formats` for `pptx` and `xlsx` before you count on it for those formats. Compare what's installed against the extensions Discover listed. If a listed format has no converter, tell the person once, before you draft anything. Name `markitdown[all]` as the one install that covers all four formats (`pipx install 'markitdown[all]'`), and ask whether to install it or skip those files. Never install a converter without the person's yes.
+
+### Convert
+
+Convert each `binary-doc` whose `cited_by` is empty into Markdown in your working directory, such as `markitdown data-retention.docx > data-retention.md`. Read the converted text in Extract, as you would any other source.
+
+Skip a file when no installed converter reads it or its converter exits with an error. List each skipped file in the run summary with the install that would have covered it. A bare `markitdown` install, without the extras, exits with an error on `.docx` and `.pdf`. Never draft from a file name, because a name like `data-retention.docx` doesn't say what the policy requires.
+
+A converted file that opens with a `# … Digest` heading, followed by a line starting `Bank commit`, is a Digest from this Bank or another one. Skip it and list it in the run summary as "a Digest; read its Bank instead." A Digest copies a Bank's accepted Records, so a Proposal drafted from one would cite a copy. `ltm publish sharepoint` also puts Digests into libraries people sync.
+
+### Cite
+
+Every Proposal drafted from the library cites `sharepoint:<site>/<library>/<relative path>`, the prefix joined to the file's path under the synced folder:
+
+```text
+ltm propose --type PolicyRule --title "Keep order records for seven years" --summary "…" --source-ref sharepoint:acme/Policies/data-retention.docx --body-file draft.md
+```
+
+### Without a Synced Folder
+
+Use this route only when the person has no synced folder, for example because the tenant blocks the OneDrive client. It also needs a SharePoint MCP tool the session already has, such as Work IQ, which is in preview. List and read the library through that tool, convert and skip as above, and cite the same `sharepoint:<site>/<library>/<path>` form. With no local folder, Discover can't fill `cited_by`, so check each file from the Bank root with `grep -rl 'sharepoint:acme/Policies/data-retention.docx' _memory`. Never install or configure an MCP server. If the tools are missing or return an error, stop and report it.
 
 ## Extract
 

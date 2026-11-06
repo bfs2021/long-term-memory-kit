@@ -19,7 +19,13 @@ const POSTGRES = "fixtures/hydration-sources/adr/0001-postgres.md";
 const RECORD = "_memory/decisions/postgres-everywhere-kQ7vN2xLp4.md";
 
 describe("ltm discover", () => {
-  test("1: the corpus lists seven entries with the expected kinds", async () => {
+  test("--source-ref-prefix with two paths exits 2", async () => {
+    const r = await ltm(repo, "discover", "fixtures/hydration-sources", "fixtures/demo-bank", "--source-ref-prefix", "sharepoint:a/b/");
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("--source-ref-prefix takes exactly one path");
+    expect(r.stdout).toBe("");
+  });
+  test("1: the corpus lists ten entries with the expected kinds", async () => {
     const r = await ltm(repo, "discover", "fixtures/hydration-sources", "--json", "--bank", "fixtures/demo-bank");
     expect(r.exitCode).toBe(0);
     const got = rows(r.stdout);
@@ -30,6 +36,9 @@ describe("ltm discover", () => {
       ["fixtures/hydration-sources/notes.md", "document"],
       ["fixtures/hydration-sources/pr-1234.json", "pr"],
       ["fixtures/hydration-sources/prd-checkout.md", "prd"],
+      ["fixtures/hydration-sources/sharepoint/data-retention.docx", "binary-doc"],
+      ["fixtures/hydration-sources/sharepoint/design-review.pdf", "binary-doc"],
+      ["fixtures/hydration-sources/sharepoint/review-deck.pptx", "binary-doc"],
       ["fixtures/hydration-sources/transcripts/arch-sync-2026-09.vtt", "transcript"],
     ]);
     expect(got.find((e) => e.path === POSTGRES)?.cited_by).toEqual(["kQ7vN2xLp4"]);
@@ -110,7 +119,7 @@ describe("ltm discover", () => {
     await withScratch(sources, async (dir) => {
       const r = await ltm(dir, "discover", ".", "--json");
       expect(r.exitCode).toBe(0);
-      expect(rows(r.stdout)).toHaveLength(7);
+      expect(rows(r.stdout)).toHaveLength(10);
       expect(rows(r.stdout).every((e) => e.cited_by === null)).toBe(true);
     });
   });
@@ -131,7 +140,7 @@ describe("ltm discover", () => {
     const r = await ltm(repo, "discover", "fixtures/hydration-sources", "nope/missing");
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("ltm discover: nope/missing: no such file or directory\n");
-    expect(r.stdout.split("\n").filter((l) => l !== "")).toHaveLength(7);
+    expect(r.stdout.split("\n").filter((l) => l !== "")).toHaveLength(10);
   });
 
   test("8: human output ends the cited ADR line with the citation", async () => {
@@ -186,6 +195,34 @@ describe("ltm discover", () => {
       expect(r.stderr).toBe(`ltm discover: ${cfg}: memory-bank.yaml is a symlink, not followed\n`);
       expect(r.stdout).toBe("");
     });
+  });
+
+  test("--source-ref-prefix: the matching prefix cites, no flag and a different prefix don't", async () => {
+    const sp = "fixtures/hydration-sources/sharepoint";
+    const cited = async (...extra: string[]) =>
+      rows((await ltm(repo, "discover", sp, "--json", "--bank", "fixtures/demo-bank", ...extra)).stdout).find(
+        (r) => r.path === `${sp}/data-retention.docx`,
+      )!.cited_by;
+    expect(await cited("--source-ref-prefix", "sharepoint:acme/Policies/")).toEqual(["vD8mH3zQb5"]);
+    expect(await cited()).toEqual([]);
+    expect(await cited("--source-ref-prefix", "sharepoint:acme/Other/")).toEqual([]);
+  });
+
+  test("--source-ref-prefix on a file argument joins to the file's parent directory", async () => {
+    const file = "fixtures/hydration-sources/sharepoint/data-retention.docx";
+    const r = await ltm(repo, "discover", file, "--json", "--bank", "fixtures/demo-bank", "--source-ref-prefix", "sharepoint:acme/Policies/");
+    expect(r.exitCode).toBe(0);
+    expect(rows(r.stdout).map((x) => [x.path, x.cited_by])).toEqual([[file, ["vD8mH3zQb5"]]]);
+  });
+
+  test("the sharepoint fixture lists three binary-docs and not notes.bin", async () => {
+    const r = await ltm(repo, "discover", "fixtures/hydration-sources/sharepoint", "--json");
+    expect(r.exitCode).toBe(0);
+    expect(rows(r.stdout).map((x) => [x.path.split("/").pop(), x.kind])).toEqual([
+      ["data-retention.docx", "binary-doc"],
+      ["design-review.pdf", "binary-doc"],
+      ["review-deck.pptx", "binary-doc"],
+    ]);
   });
 
   test("the folder rule sees the enclosing adr directory from inside it", async () => {

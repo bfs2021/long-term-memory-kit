@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,6 +142,14 @@ describe("citedBy", () => {
     expect(citedBy("x/a/b.md", "a/b.md", [r])).toEqual(["r1"]);
     expect(citedBy("x/a/b.md", null, [r])).toEqual([]);
   });
+  test("an extra candidate cites only on an exact match", () => {
+    const recs = [rec("aaaaaaaaaa", { source_refs: ["sharepoint:acme/Policies/data-retention.docx"] })];
+    const f = "lib/data-retention.docx";
+    expect(citedBy(f, null, recs, "sharepoint:acme/Policies/data-retention.docx")).toEqual(["aaaaaaaaaa"]);
+    expect(citedBy(f, null, recs, "sharepoint:acme/Policies/data-retention.docx/")).toEqual([]);
+    expect(citedBy(f, null, recs, "sharepoint:acme/Other/data-retention.docx")).toEqual([]);
+    expect(citedBy(f, null, recs)).toEqual([]);
+  });
   test("ids come back sorted", () => {
     const rs = [rec("b", { source_refs: ["a.md"] }), rec("a", { source_refs: ["a.md"] })];
     expect(citedBy("a.md", null, rs)).toEqual(["a", "b"]);
@@ -168,6 +176,49 @@ describe("discover", () => {
     });
     return { entries, errors, skips };
   };
+
+  test("Office and PDF files are binary-doc by extension, unread and uncapped", async () => {
+    await scratch((dir) => {
+      writeFileSync(join(dir, "a.docx"), "x".repeat(1_048_577));
+      writeFileSync(join(dir, "b.PDF"), "%PDF");
+      writeFileSync(join(dir, "c.pptx"), "x");
+      writeFileSync(join(dir, "d.xlsx"), "x");
+      writeFileSync(join(dir, "notes.bin"), "\u0000\u0001");
+      const { entries, skips } = run(dir, ["."]);
+      expect(entries.map((e) => [e.path, e.kind, e.title, e.bytes])).toEqual([
+        ["a.docx", "binary-doc", "a", 1_048_577],
+        ["b.PDF", "binary-doc", "b", 4],
+        ["c.pptx", "binary-doc", "c", 1],
+        ["d.xlsx", "binary-doc", "d", 1],
+      ]);
+      expect(skips).toEqual([]);
+    });
+  });
+
+  test.skipIf(process.getuid?.() === 0)("an unreadable .docx still gets its entry", async () => {
+    await scratch((dir) => {
+      const p = join(dir, "locked.docx");
+      writeFileSync(p, "secret");
+      chmodSync(p, 0o000);
+      try {
+        const { entries, skips } = run(dir, ["."]);
+        expect(entries.map((e) => [e.path, e.kind, e.bytes])).toEqual([["locked.docx", "binary-doc", 6]]);
+        expect(skips).toEqual([]);
+      } finally {
+        chmodSync(p, 0o644);
+      }
+    });
+  });
+
+  test("a symlinked .docx is still skipped", async () => {
+    await scratch((dir) => {
+      writeFileSync(join(dir, "real.docx"), "x");
+      symlinkSync(join(dir, "real.docx"), join(dir, "link.docx"));
+      const { entries, skips } = run(dir, ["."]);
+      expect(entries.map((e) => e.path)).toEqual(["real.docx"]);
+      expect(skips).toContain("link.docx: symlink, not followed");
+    });
+  });
 
   test("walks sorted, skips dot entries, node_modules, symlinks, and big files", async () => {
     await scratch((dir) => {

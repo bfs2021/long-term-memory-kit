@@ -83,5 +83,5 @@ Drafting proposals from existing material such as ADRs, transcripts, PRDs, and p
 _Avoid_: Ingestion, import, seeding
 
 **Hydration source**:
-A local file that hydration reads, which `ltm discover` classifies as `adr`, `pr`, `transcript`, `prd`, or `document`.
+A local file that hydration reads, which `ltm discover` classifies as `adr`, `pr`, `transcript`, `prd`, `document`, or `binary-doc`. A file in a synced SharePoint library counts as local. A digest never counts as a hydration source.
 _Avoid_: Input, seed file, raw material
