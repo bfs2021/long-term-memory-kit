@@ -239,6 +239,12 @@ describe("readEntry", () => {
     expect(source(readEntry("log.md", "# Log\n\n## A\n\nText.\n\n## B\npromoted_to: acme:b\n", "A")).existing).toBeNull();
   });
 
+  test("a promoted_to line with no space after the colon, or no value, still gives existing", () => {
+    expect(source(readEntry("log.md", "# Log\n\n## A\npromoted_to:acme:x\n\nText.\n", "A")).existing).toBe("acme:x");
+    expect(source(readEntry("log.md", "# Log\n\n## A\npromoted_to:\n\nText.\n", "A")).existing).toBe("");
+    expect(source(readEntry("log.md", "# Log\n\n## A\n\nowner:x\nText.\n", "A")).existing).toBeNull();
+  });
+
   test("CRLF entries stamp with CRLF and match their heading without the \\r", () => {
     const text = "# Log\r\n\r\n## A\r\nText.\r\n## B\r\nMore.\r\n";
     const s = source(readEntry("log.md", text, "A"));
@@ -342,6 +348,56 @@ describe("readEntry dated headings", () => {
     if (s.kind !== "entry") throw new Error("expected an entry");
     expect(s.body).toBe("b\n");
     expect(s.title).toBe("Cap retries");
+  });
+});
+
+describe("readEntry metadata block", () => {
+  const META = "# Log\n\n## 2026-10-01: Cap retries\nstatus: accepted\ndate: 2026-10-01\n\nProse.\n";
+
+  test("the block stays out of the body", () => {
+    const s = source(readEntry("log.md", META, "Cap retries"));
+    expect(s.body).toBe("\nProse.\n");
+    expect(s.body).not.toContain("status: accepted");
+    expect(s.body).not.toContain("date: 2026-10-01");
+    expect(s.existing).toBeNull();
+  });
+
+  test("the stamp is the block's last line and the blank line survives", () => {
+    const stamped = source(readEntry("log.md", META, "Cap retries")).stamp("promoted_to: acme:abc");
+    expect(stamped.text).toBe("# Log\n\n## 2026-10-01: Cap retries\nstatus: accepted\ndate: 2026-10-01\npromoted_to: acme:abc\n\nProse.\n");
+    expect(stamped.line).toBe(6);
+  });
+
+  test("plain, list, and bold stamps in the block are existing", () => {
+    for (const l of ["promoted_to: acme:abc", "- promoted_to: acme:abc", "**promoted_to:** acme:abc", "- promoted_to:   acme:abc  "]) {
+      expect(source(readEntry("log.md", `## A\nstatus: accepted\n${l}\n\nProse.\n`, "A")).existing).toBe("acme:abc");
+    }
+  });
+
+  test("falsifier: a stamp below the blank line is prose, not a stamp", () => {
+    expect(source(readEntry("log.md", "## A\nstatus: accepted\n\npromoted_to: acme:abc\n", "A")).existing).toBeNull();
+    expect(source(readEntry("log.md", "## A\n\nText.\npromoted_to: acme:abc\n", "A")).existing).toBeNull();
+  });
+
+  test("falsifier: a key outside the set stays in the body", () => {
+    const s = source(readEntry("log.md", "## A\nowner: x\n\nProse.\n", "A"));
+    expect(s.body).toBe("owner: x\n\nProse.\n");
+    expect(source(readEntry("log.md", "## A\nstatus: accepted\nowner: x\n\nP.\n", "A")).body).toBe("owner: x\n\nP.\n");
+  });
+
+  test("CRLF block stamps with CRLF", () => {
+    const text = "## A\r\nstatus: accepted\r\n\r\nP.\r\n";
+    const s = source(readEntry("log.md", text, "A"));
+    expect(s.body).toBe("\r\nP.\r\n");
+    expect(s.stamp("promoted_to: acme:x").text).toBe("## A\r\nstatus: accepted\r\npromoted_to: acme:x\r\n\r\nP.\r\n");
+  });
+
+  test("a block ending the file with no newline stamps on a new line", () => {
+    const s = source(readEntry("log.md", "## A\nstatus: accepted", "A"));
+    expect(s.body).toBe("");
+    const stamped = s.stamp("promoted_to: acme:x");
+    expect(stamped.text).toBe("## A\nstatus: accepted\npromoted_to: acme:x");
+    expect(stamped.line).toBe(3);
   });
 });
 
@@ -527,6 +583,11 @@ describe("promoteSource", () => {
         writeFileSync(join(repo, ADR_3), stampedAdr);
         const again = await promote(clone, repo, ADR_3, forge);
         expect("refusal" in again && again.refusal).toBe(`${ADR_3} already has promoted_to 'acme:X'`);
+
+        const bold = "_working-memory/bold.md";
+        writeFileSync(join(repo, bold), "## A\n**promoted_to:** acme:abc\n\nP.\n");
+        const styled = await promote(clone, repo, bold, forge, { entry: "A" });
+        expect("refusal" in styled && styled.refusal).toBe(`${bold} already has promoted_to 'acme:abc'`);
 
         const untitled = "docs/adr/0009-untitled.md";
         writeFileSync(join(repo, untitled), "no heading here\n");
