@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run } from "../../src/cli/run.ts";
+import { withConsumerRepo } from "../helpers/consumer-repo.ts";
+import { git } from "../helpers/git-bank.ts";
 import { withScratch } from "../helpers/scratch.ts";
 
 const repo = fileURLToPath(new URL("../..", import.meta.url));
@@ -86,7 +88,51 @@ describe("ltm discover", () => {
     });
   });
 
-  test("4: only source_refs counts as a citation", async () => {
+  test("promoted_from cites the promoted ADR and decision log in the Consumer repo", async () => {
+    await withConsumerRepo(async (dir) => {
+      const adr = "docs/adr/0003-use-postgres.md";
+      writeFileSync(join(dir, adr), "# Use Postgres\n\n## Context\n\nx\n\n## Decision\n\ny\n");
+      await withScratch(demo, async (bank) => {
+        const file = join(bank, RECORD);
+        const original = readFileSync(file, "utf8");
+        const line = `source_refs: [${POSTGRES}]\n`;
+        expect(original).toContain(line);
+        const setPf = (v: string) => writeFileSync(file, original.replace(line, `promoted_from: ${v}\n`));
+        const cited = async (path: string, cwd = dir, arg = ".") =>
+          rows((await ltm(cwd, "discover", arg, "--json", "--bank", bank)).stdout).find((r) => r.path === path)?.cited_by;
+        const log = "_working-memory/decisionLog.md";
+
+        setPf(`acme/order-service:${adr}`);
+        expect(await cited(adr)).toEqual(["kQ7vN2xLp4"]);
+        expect(await cited("adr/0003-use-postgres.md", join(dir, "docs"))).toEqual(["kQ7vN2xLp4"]);
+
+        setPf(`acme/billing:${adr}`);
+        expect(await cited(adr)).toEqual([]);
+
+        setPf(`acme/order-service:${log}#2026-10-02-batch-order-events-per-partition`);
+        expect(await cited(log)).toEqual(["kQ7vN2xLp4"]);
+        setPf(`acme/order-service:${log}#cap-retries-at-three-per-request`);
+        expect(await cited(log)).toEqual(["kQ7vN2xLp4"]);
+      });
+    });
+  });
+
+  test("promoted_from does not cite when the Consumer repo has no origin to name it", async () => {
+    await withConsumerRepo(async (dir) => {
+      git(dir, "remote", "remove", "origin");
+      const adr = "docs/adr/0003-use-postgres.md";
+      writeFileSync(join(dir, adr), "# Use Postgres\n\n## Context\n\nx\n\n## Decision\n\ny\n");
+      await withScratch(demo, async (bank) => {
+        const file = join(bank, RECORD);
+        const line = `source_refs: [${POSTGRES}]\n`;
+        writeFileSync(file, readFileSync(file, "utf8").replace(line, `promoted_from: acme/order-service:${adr}\n`));
+        const out = rows((await ltm(dir, "discover", ".", "--json", "--bank", bank)).stdout);
+        expect(out.find((r) => r.path === adr)?.cited_by).toEqual([]);
+      });
+    });
+  });
+
+  test("4: related and body mentions don't cite; source_refs does", async () => {
     await withScratch(demo, async (bank) => {
       const cited = async () =>
         rows((await ltm(repo, "discover", "fixtures/hydration-sources/adr/0001-postgres.md", "--json", "--bank", bank)).stdout)[0]!
