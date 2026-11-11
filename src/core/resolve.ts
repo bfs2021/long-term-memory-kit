@@ -70,10 +70,11 @@ export function identityString(id: RemoteIdentity): string {
   return `${id.host}/${id.org}/${id.repo}`;
 }
 
+// Hosts treat owner and repo names as case-insensitive, so every segment folds for the comparison; identityString keeps the origin's spelling.
 export function matchRule(match: string, identity: string): boolean {
   if (match === "*") return true;
-  const want = match.split("/");
-  const have = identity.split("/");
+  const want = match.toLowerCase().split("/");
+  const have = identity.toLowerCase().split("/");
   return want.length === have.length && want.every((seg, i) => seg === "*" || seg === have[i]);
 }
 

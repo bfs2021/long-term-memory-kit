@@ -95,6 +95,17 @@ describe("matchRule", () => {
     expect(matchRule("gitlab.com/grp/*/*", "gitlab.com/grp/sub/repo")).toBe(true);
     expect(matchRule("gitlab.com/*/*", "gitlab.com/grp/sub/repo")).toBe(false);
   });
+
+  test("every segment folds case on either side of the comparison", () => {
+    expect(matchRule("github.com/acme/*", "github.com/Acme/x")).toBe(true);
+    expect(matchRule("github.com/acme/*", "github.com/acme/Order-Service")).toBe(true);
+    expect(matchRule("github.com/ACME/*", "github.com/acme/x")).toBe(true);
+    expect(matchRule("gitlab.com/Grp/*/Repo", "gitlab.com/grp/sub/repo")).toBe(true);
+  });
+
+  test("folding case is not forgiving of a different letter", () => {
+    expect(matchRule("github.com/acme/*", "github.com/acmf/x")).toBe(false);
+  });
 });
 
 describe("userConfigPath", () => {
@@ -361,6 +372,24 @@ describe("resolveBanks", () => {
     const r = resolveBanks(repo, env);
     expect(names(r)).toEqual(["personal"]);
     expect(r.resolvedBy).toBe("default");
+  });
+
+  // Hosts treat owner and repo names as case-insensitive, so only a different letter may change the Bank.
+  test("case-only changes to the origin's owner or repo keep the Bank; a different letter does not", () => {
+    writeFileSync(configPath, exampleConfig);
+    let r = resolveBanks(repo, env);
+    expect(names(r)).toEqual(["acme", "personal"]);
+    expect(r.resolvedBy).toBe("rules");
+
+    setOrigin("git@github.com:Acme/Order-Service.git");
+    r = resolveBanks(repo, env);
+    expect(names(r)).toEqual(["acme", "personal"]);
+    expect(r.resolvedBy).toBe("rules");
+
+    setOrigin("git@github.com:acmf/order-service.git");
+    r = resolveBanks(repo, env);
+    expect(names(r)).toEqual(["personal"]);
+    expect(r.resolvedBy).toBe("rules");
   });
 
   test("two rules naming the same Bank open it once", () => {

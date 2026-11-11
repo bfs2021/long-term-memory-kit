@@ -112,13 +112,25 @@ describe("ltm query from a Consumer repo", () => {
     expect(r.stderr).not.toContain("not mapped");
   });
 
-  // --bank bypasses the case-sensitive routing rules, so the Acme owner still reaches the consumers lookup.
+  // --bank bypasses routing, so this pins the consumers lookup itself for a mixed-case origin; routing is covered without the flag.
   test("an Acme/Order-Service origin finds the lowercase consumers key under --bank", async () => {
     setOrigin("git@github.com:Acme/Order-Service.git");
     const r = await ltm(repo, "query", "--bank", "acme", "--type", "Exception");
     expect(r.exitCode).toBe(0);
     expect(lines(r.stdout)).toContainEqual(expect.stringMatching(new RegExp(`^acme:${REDIS}  `)));
     expect(r.stderr).not.toContain("not mapped");
+  });
+
+  // The rule matches with case folded, so no --bank is needed for the Acme owner to reach the acme Bank.
+  test("an Acme/Order-Service origin routes by rule without --bank and finds its consumers entry", async () => {
+    setOrigin("git@github.com:Acme/Order-Service.git");
+    const r = await ltm(repo, "query", "--type", "Exception");
+    expect(r.exitCode).toBe(0);
+    expect(lines(r.stdout)).toContainEqual(expect.stringMatching(new RegExp(`^acme:${REDIS}  `)));
+    expect(r.stderr).toBe("");
+
+    const json = await ltm(repo, "query", "--json");
+    expect(JSON.parse(json.stdout).resolved_by).toBe("rules");
   });
 
   test("an unmapped repo gets the demo Bank's own org-wide Record, with the not-mapped note", async () => {
